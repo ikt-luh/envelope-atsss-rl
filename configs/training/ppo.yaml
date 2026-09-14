@@ -1,0 +1,38 @@
+algo: ppo
+iterations: 100
+checkpoint_freq: 10
+session_id: ppo-train
+
+reward_params:
+  r_max: 1.0
+  epsilon: 1.0e-6
+  alpha: 0 # WARNING: No stability penalty
+# WARNING: Do NOT enable early termination with --with-scenarios. Easy scenarios
+# (no impairment) produce high rewards immediately, causing premature episode
+# termination and biasing training away from hard scenarios.
+early_termination_reward_threshold: null
+early_termination_window: 50
+max_steps: 30
+
+agent_config:
+  num_workers: 0
+  normalize_rewards: true
+  train_batch_size: 450  # 300 also works but 450 seems to behave a bit more nicely
+  minibatch_size: 32
+  num_epochs: 10
+  lr: 5.0e-5 # TODO: changed from 5
+  gamma: 0.9 # low gamma because our returns are expected to be noisy. Focus on short-term future
+  lambda_: 0.4 # low lambda because our returns are expected to be noisy. Increases bias but reduces variance
+  clip_param: 0.1
+  vf_clip_param: 5.0
+  grad_clip: 1.0
+  entropy_coeff: 0 # should stay 0, as otherwise the agent simply maximizes entropy
+  kl_target: 0.01
+  model:
+    fcnet_hiddens: [256, 256]
+    fcnet_activation: relu # LeakyReLU
+    # LSTM config (only used by LSTM agent)
+    lstm_cell_size: 256
+    lstm_use_prev_action: false  # not supported by current code, was manually added as env observation
+    lstm_use_prev_reward: false  # not supported by current code, as agent class does not receive rewards
+    max_seq_len: 10

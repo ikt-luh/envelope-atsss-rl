@@ -1,0 +1,32 @@
+# python / build artifacts
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# virtual environments
+venv/
+.venv/
+
+# environment / secrets
+.env
+.env.*
+!.env.example
+
+# ray / rl training outputs
+ray_results/
+results/
+logs/
+plots/
+
+# editor / os noise
+.DS_Store
+.idea/
+.vscode/
+
+# docker / compose
+*.log
+*.pid

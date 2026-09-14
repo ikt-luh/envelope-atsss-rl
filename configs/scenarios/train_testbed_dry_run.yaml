@@ -1,0 +1,16 @@
+# minimal scenario config file for RTT and packet loss tests
+episodes_per_config: 1
+seed: 42
+
+# bursty: 5 Mbit every 0.5 s
+bursty_mbit_per_period: 5
+bursty_period_s: 0.5
+# control and bulk traffic Mbps
+control_bandwidth_mbps: 0.5
+bulk_mbps: 10
+
+rtt_pairs: # rtt in ms
+  - { wifi: [3, 50], fiveg: [25, 50] }
+
+loss_pairs: # loss in percent
+  - { wifi: [0, 5], fiveg: [0, 5] }

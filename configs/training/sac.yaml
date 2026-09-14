@@ -1,0 +1,38 @@
+algo: sac
+iterations: 500
+checkpoint_freq: 10
+session_id: train-session-001
+
+# network scenarios (tc/netem + iperf3): enable with --with-scenarios or with_scenarios: true
+with_scenarios: false
+scenario_config_file: configs/training/scenarios.yaml
+
+reward_params:
+  r_max: 2.0
+  epsilon: 1.0e-6
+  alpha: 15
+# WARNING: Do NOT enable early termination with --with-scenarios. Easy scenarios
+# (no impairment) produce high rewards immediately, causing premature episode
+# termination and biasing training away from hard scenarios.
+early_termination_reward_threshold: null
+early_termination_window: 50
+max_steps: 200
+
+
+agent_config:
+  num_workers: 0
+  normalize_rewards: true
+  train_batch_size: 4000
+  sgd_minibatch_size: 128
+  num_sgd_iter: 30
+  lr: 5.0e-5
+  gamma: 0.99
+  lambda: 0.95
+  clip_param: 0.2
+  vf_clip_param: 10.0
+  grad_clip: 40
+  entropy_coeff: 0.005
+  target_kl: 0.01
+  model:
+    fcnet_hiddens: [256, 256]
+    fcnet_activation: relu
