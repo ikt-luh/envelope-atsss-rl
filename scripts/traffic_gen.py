@@ -196,10 +196,13 @@ def _write_paced_fifo(fd, rate_mbps: float, stop_event: threading.Event, chunk_s
         if budget < chunk_size:
             stop_event.wait(min((chunk_size - budget) / bps, 0.05))
             continue
-        n = fd.write(payload)
-        if n:
-            sent += n
-            _increment_bytes_sent(n)
+        try:
+            n = fd.write(payload)
+            if n:
+                sent += n
+                _increment_bytes_sent(n)
+        except Exception as e:
+            log.error("FIFO writer: %s", e)
 
 
 def _write_bursty_fifo(fd, burst_bytes: int, stop_event: threading.Event, chunk_size: int) -> None:
@@ -208,10 +211,13 @@ def _write_bursty_fifo(fd, burst_bytes: int, stop_event: threading.Event, chunk_
     sent = 0
     while sent < burst_bytes and not stop_event.is_set():
         chunk = min(chunk_size, burst_bytes - sent)
-        n = fd.write(payload[:chunk])
-        if n:
-            sent += n
-            _increment_bytes_sent(n)
+        try:
+            n = fd.write(payload[:chunk])
+            if n:
+                sent += n
+                _increment_bytes_sent(n)
+        except Exception as e:
+            log.error("FIFO writer: %s", e)
 
 
 def run_fifo_writer(
@@ -261,11 +267,13 @@ def run_fifo_writer(
                 log.info(f"Periodic traffic with {rate_mbps:.2f} Mbps")
                 _write_paced_fifo(fd, rate_mbps, stop_event, chunk_size)
         except OSError as e:
-            log.warning("FIFO writer: %s — reopening in 2s", e)
+            log.error("FIFO writer: %s — reopening in 2s", e)
         finally:
             try:
+                log.info("Trying to close FIFO...")
                 fd.close()
-            except OSError:
+            except OSError as e:
+                log.error("FIFO writer: %s", e)
                 pass
 
         if not stop_event.is_set():

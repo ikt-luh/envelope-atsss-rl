@@ -71,7 +71,7 @@ DEFAULT_CAPACITY_RATIOS: Optional[Tuple[CapacityRatio, ...]] = tuple()  # (Capac
 @dataclass
 class ScenarioSettings:
     # loaded from YAML + env overrides.
-    mpquic_fifo_input_path: str = os.getenv("TESTBED_UE_FIFO_INPUT_PATH", "/tmp/webrtc_fifo_input")
+    mpquic_fifo_input_path: str = os.getenv("TESTBED_UE_FIFO_INPUT_PATH", "/tmp/fifo_input")
     wifi_iface: str = os.getenv("PMF_UE_WIFI_IFACE", os.getenv("TESTBED_SCENARIO_WIFI_IFACE", ""))
     fiveg_iface: str = os.getenv("PMF_UE_5G_IFACE", os.getenv("TESTBED_SCENARIO_5G_IFACE", ""))
     ane_ip: str = os.getenv("SCENARIO_ANE_IP", os.getenv("TESTBED_SCENARIO_ANE_IP", ""))
