@@ -17,6 +17,7 @@ import time
 from ray.rllib.callbacks.callbacks import RLlibCallback
 from ray.rllib.evaluation.episode_v2 import EpisodeV2
 
+from pmf_client.client import PMFMetrics
 from scenarios.applier import ScenarioManager, TrafficWatcher
 from scenarios.sampler import ScenarioConfig
 
@@ -30,22 +31,22 @@ except ImportError:  # fix for Python < 3.11
 
 logger = logging.getLogger(__name__)
 
-OBS_DIM = 12
+OBS_DIM = 16
 OBS_FLAG_VALID = 1
 OBS_FLAG_INVALID = 0
 
 OBS_LOW = np.array(
-    [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, OBS_FLAG_INVALID],
+    [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, OBS_FLAG_INVALID, OBS_FLAG_INVALID, OBS_FLAG_INVALID],
     dtype=np.float32,
 )
 OBS_HIGH = np.array(
-    [1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 0.5, 1.0, 1.0, 0.5, float('inf'), float('inf'), 1.0, OBS_FLAG_VALID],
+    [1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 0.5, 1.0, 1.0, 0.5, float('inf'), float('inf'), 1.0, OBS_FLAG_VALID, OBS_FLAG_VALID, OBS_FLAG_VALID],
     dtype=np.float32,
 )
 OBS_PLACEHOLDER = OBS_LOW
 
 
-def build_observation(metrics, previous_action, delta_bytes_wifi, delta_bytes_fiveg) -> np.ndarray:
+def build_observation(metrics: PMFMetrics, previous_action, delta_bytes_wifi, delta_bytes_fiveg) -> np.ndarray:
     """
     Build an observation from a PMFMetrics instance and additional info.
     """
@@ -63,6 +64,8 @@ def build_observation(metrics, previous_action, delta_bytes_wifi, delta_bytes_fi
         delta_bytes_wifi / 1_000_000.0,
         delta_bytes_fiveg / 1_000_000.0,
         previous_action,
+        OBS_FLAG_VALID if metrics.wifi_valid else OBS_FLAG_INVALID,
+        OBS_FLAG_VALID if metrics.fiveg_valid else OBS_FLAG_INVALID,
         OBS_FLAG_VALID], dtype=np.float32)
     return np.clip(obs, OBS_LOW, OBS_HIGH)
 
@@ -179,17 +182,6 @@ class RLEnv(gym.Env):
                 cfg: ScenarioConfig = self.scenario_manager.sample_and_apply()
                 # print(f"[train] Applying scenario {cfg.label}, rtt {cfg.wifi_extra_delay_ms}, {cfg.fiveg_extra_delay_ms}, loss {cfg.wifi_loss_pct}, {cfg.fiveg_loss_pct}")
                 self._scenario_info = cfg.to_log_dict()
-                # flush_cache() was called inside sample_and_apply — trigger a
-                # fresh measurement and wait up to 30s for the cache to refill
-                # before trying to get an observation.
-                if self.pmf_client is not None:
-                    if hasattr(self.pmf_client, "trigger_new_measurements"):
-                        self.pmf_client.trigger_new_measurements()
-                    for _ in range(30):
-                        if self.pmf_client.get_metrics(self.session_id) is not None:
-                            break
-                        time.sleep(1.0)
-                # TODO: Set weight according to traffic class
         else:
             self._scenario_info = {}
 

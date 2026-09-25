@@ -6,6 +6,8 @@ from __future__ import annotations
 
 import argparse
 import logging
+import os
+import errno
 import signal
 import socket
 import sys
@@ -220,6 +222,26 @@ def _write_bursty_fifo(fd, burst_bytes: int, stop_event: threading.Event, chunk_
             log.error("FIFO writer: %s", e)
 
 
+def open_fifo_writer_nonblocking(path, timeout):
+    deadline = time.monotonic() + timeout
+
+    while True:
+        try:
+            fd = os.open(path, os.O_WRONLY | os.O_NONBLOCK)
+            return os.fdopen(fd, "wb", buffering=0)
+
+        except OSError as e:
+            if e.errno != errno.ENXIO:
+                raise
+
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise TimeoutError(
+                    f"No reader connected to {path} within {timeout}s"
+                )
+
+            time.sleep(min(0.01, remaining))
+
 def run_fifo_writer(
     path: str,
     mode: str,
@@ -227,7 +249,8 @@ def run_fifo_writer(
     burst_mb: float,
     burst_period_s: float,
     chunk_size: Optional[int] = None,
-    stop_event: Optional[threading.Event] = None
+    stop_event: Optional[threading.Event] = None,
+    ready_event: Optional[threading.Event] = None
 ) -> None:
     log.info("FIFO writer starting — path=%s mode=%s", path, mode)
 
@@ -242,15 +265,19 @@ def run_fifo_writer(
     while not stop_event.is_set():
         try:
             log.info("Opening FIFO '%s' (waiting for reader)...", path)
-            fd = open(path, "wb", buffering=0)  # noqa: WPS515
+            # fd = open(path, "wb", buffering=0)  # noqa: WPS515
+            fd = open_fifo_writer_nonblocking(path, 2.0)
         except FileNotFoundError:
-            log.error("FIFO %s not found — retry in 2s", path)
-            stop_event.wait(2.0)
+            log.error("FIFO %s not found", path)
+            stop_event.wait(1.0)
             continue
         except OSError as e:
-            log.error("Cannot open FIFO %s: %s — retry in 2s", path, e)
-            stop_event.wait(2.0)
+            log.error("Cannot open FIFO %s: %s", path, e)
+            stop_event.wait(1.0)
             continue
+
+        if ready_event is not None:
+            ready_event.set()
 
         log.info("FIFO %s open, writing %s traffic", path, mode)
         try:
@@ -279,7 +306,7 @@ def run_fifo_writer(
         if not stop_event.is_set():
             stop_event.wait(2.0)
 
-    log.info("FIFO writer stopped.")
+    log.info("Traffic generator stopped.")
 
 
 # client entry point

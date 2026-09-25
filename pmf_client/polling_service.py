@@ -39,9 +39,18 @@ class CachedMetrics:
     last_update: Optional[float] = None
     source: str = "pmf-polling-service"
     wifi_rtt_measured_at: Optional[float] = None
+    wifi_rtt_job_completion_time: Optional[float] = None
+    # whether the last job request resulted in a valid measurement (True) or whether it timed out (False)
+    wifi_rtt_valid: Optional[bool] = None
     fiveg_rtt_measured_at: Optional[float] = None
+    fiveg_rtt_job_completion_time: Optional[float] = None
+    fiveg_rtt_valid: Optional[bool] = None
     wifi_plr_measured_at: Optional[float] = None
+    wifi_plr_valid: Optional[bool] = None
+    wifi_plr_job_completion_time: Optional[float] = None
     fiveg_plr_measured_at: Optional[float] = None
+    fiveg_plr_valid: Optional[bool] = None
+    fiveg_plr_job_completion_time: Optional[float] = None
 
     def is_stale(self, max_age_seconds: float) -> bool:
         if self.last_update is None:
@@ -71,7 +80,9 @@ class CachedMetrics:
 
         return PMFMetrics(
             wifi_rtt_ms=self.wifi_rtt_ms,
+            wifi_valid=self.wifi_plr_valid and self.wifi_rtt_valid,
             fiveg_rtt_ms=self.fiveg_rtt_ms,
+            fiveg_valid=self.fiveg_plr_valid and self.fiveg_rtt_valid,
             wifi_plr=self.wifi_plr,
             fiveg_plr=self.fiveg_plr,
             timestamp=datetime.utcnow().strftime("%Y-%m-%dT%H:%M:%SZ") if self.last_update else "",
@@ -103,7 +114,9 @@ class PMFPollingService:
                  ue_wifi_iface: str = "",
                  ue_5g_iface: str = "",
                  use_uplink: bool = True,
-                 asynchronous: bool = True):
+                 asynchronous: bool = True,
+                 inter_job_wait_time_s: Optional[int] = None,
+                 get_plr_from_rtt_job = True):
 
         self.pmf_ue_url = pmf_ue_url.rstrip('/')
         self.pmf_upf_url = pmf_upf_url.rstrip('/')
@@ -120,6 +133,8 @@ class PMFPollingService:
         self.ue_5g_iface = ue_5g_iface
         self.use_uplink = use_uplink
         self.asynchronous = asynchronous
+        self.inter_job_wait_time_s = inter_job_wait_time_s
+        self.get_plr_from_rtt_job = get_plr_from_rtt_job
 
         self._cache = CachedMetrics()
         self._cache_lock = Lock()
@@ -209,8 +224,8 @@ class PMFPollingService:
         self.active_jobs = {
             k: v for k, v in self.active_jobs.items() if v.status == "pending"
         }
-        self._trigger_event.set()
-        logger.info("PMF cache flushed; fresh measurements triggered")
+        # self._trigger_event.set()
+        logger.info("PMF cache flushed")
 
     def _polling_loop(self):
         logger.info("PMF polling loop started")
@@ -244,31 +259,50 @@ class PMFPollingService:
 
         logger.info("PMF polling loop stopped")
 
+    def _inter_job_wait(self):
+        if self.inter_job_wait_time_s is not None:
+            time.sleep(self.inter_job_wait_time_s)
+
     def _submit_measurement_jobs(self):
         needs_wifi_rtt = not any(j.job_type == "rtt_wifi" and j.status == "pending"
                                  for j in self.active_jobs.values())
         needs_5g_rtt = not any(j.job_type == "rtt_5g" and j.status == "pending"
                               for j in self.active_jobs.values())
-        needs_wifi_plr = not any(j.job_type == "plr_wifi" and j.status == "pending"
+
+        if self.get_plr_from_rtt_job:
+            needs_wifi_plr = False
+            needs_5g_plr = False
+        else:
+            needs_wifi_plr = not any(j.job_type == "plr_wifi" and j.status == "pending"
+                                    for j in self.active_jobs.values())
+            needs_5g_plr = not any(j.job_type == "plr_5g" and j.status == "pending"
                                 for j in self.active_jobs.values())
-        needs_5g_plr = not any(j.job_type == "plr_5g" and j.status == "pending"
-                              for j in self.active_jobs.values())
 
         if needs_wifi_rtt:
-            if self.use_uplink:
-                job = self._submit_rtt_job_uplink("non3gpp", self.ue_wifi_iface, self.ue_wifi_ip, "rtt_wifi")
-            else:
-                job = self._submit_rtt_job_downlink("non3gpp", "eth0", self.ue_wifi_ip, "rtt_wifi")
-            if job:
-                self.active_jobs[job.job_id] = job
+            try:
+                if self.use_uplink:
+                    job = self._submit_rtt_job_uplink("non3gpp", self.ue_wifi_iface, self.ue_wifi_ip, "rtt_wifi")
+                else:
+                    job = self._submit_rtt_job_downlink("non3gpp", "eth0", self.ue_wifi_ip, "rtt_wifi")
+
+                self._inter_job_wait()
+                if job:
+                    self.active_jobs[job.job_id] = job
+            except Exception as e:
+                logger.warning(f"WiFi RTT job submission failed: {e}")
 
         if needs_5g_rtt:
-            if self.use_uplink:
-                job = self._submit_rtt_job_uplink("3gpp", self.ue_5g_iface, self.ue_5g_ip, "rtt_5g")
-            else:
-                job = self._submit_rtt_job_downlink("3gpp", "eth0", self.ue_5g_ip, "rtt_5g")
-            if job:
-                self.active_jobs[job.job_id] = job
+            try:
+                if self.use_uplink:
+                    job = self._submit_rtt_job_uplink("3gpp", self.ue_5g_iface, self.ue_5g_ip, "rtt_5g")
+                else:
+                    job = self._submit_rtt_job_downlink("3gpp", "eth0", self.ue_5g_ip, "rtt_5g")
+
+                self._inter_job_wait()
+                if job:
+                    self.active_jobs[job.job_id] = job
+            except Exception as e:
+                logger.warning(f"5G PLR job submission failed: {e}")
 
         if needs_wifi_plr:
             try:
@@ -276,6 +310,8 @@ class PMFPollingService:
                     job = self._submit_plr_job_uplink("non3gpp", self.ue_wifi_iface, self.ue_wifi_ip, "plr_wifi")
                 else:
                     job = self._submit_plr_job_downlink("non3gpp", "eth0", self.ue_wifi_ip, "plr_wifi")
+
+                self._inter_job_wait()
                 if job:
                     self.active_jobs[job.job_id] = job
             except Exception as e:
@@ -287,6 +323,8 @@ class PMFPollingService:
                     job = self._submit_plr_job_uplink("3gpp", self.ue_5g_iface, self.ue_5g_ip, "plr_5g")
                 else:
                     job = self._submit_plr_job_downlink("3gpp", "eth0", self.ue_5g_ip, "plr_5g")
+
+                self._inter_job_wait()
                 if job:
                     self.active_jobs[job.job_id] = job
             except Exception as e:
@@ -319,17 +357,18 @@ class PMFPollingService:
             job_id = data.get("job_id")
 
             if job_id:
+                now = time.time()
                 job = PMFJob(
                     job_id=job_id,
                     job_type=job_type,
-                    submitted_at=time.time(),
+                    submitted_at=now,
                     access_type=access_type,
                     status="pending"
                 )
                 if self._pmf_unreachable_logged:
                     logger.info("PMF connectivity recovered")
                     self._pmf_unreachable_logged = False
-                logger.info(f"Submitted uplink {job_type} job: {job_id}")
+                logger.info(f"Submitted uplink {job_type} job: {job_id} at {now}")
                 return job
             else:
                 logger.warning(f"No job_id in RTT response from PMF UE: {data}")
@@ -488,45 +527,90 @@ class PMFPollingService:
             logger.warning(f"Failed to submit PLR job to PMF UPF ({job_type}): {e}")
             return None
 
+
+    def _update_cache_for_timeout(self, job, now):
+        age = now - job.submitted_at
+        if job.job_type == "rtt_wifi":
+            sentinel = float(self.probe_timeout_ms)
+            with self._cache_lock:
+                self._cache.wifi_rtt_ms = sentinel
+                self._cache.wifi_rtt_min_ms = sentinel
+                self._cache.wifi_rtt_max_ms = sentinel
+                self._cache.wifi_rtt_std_ms = 0.0
+                self._cache.wifi_rtt_measured_at = now
+                self._cache.wifi_rtt_job_completion_time = self.job_timeout
+                self._cache.wifi_rtt_valid = False
+                self._cache.last_update = now
+                if self.get_plr_from_rtt_job:
+                    self._cache.wifi_plr = 1.0
+                    self._cache.wifi_plr_measured_at = now
+                    self._cache.wifi_plr_valid = False
+                    self._cache.wifi_plr_job_completion_time = self.job_timeout
+            logger.warning(
+                "WiFi RTT probe timed out after %.0fs (sentinel %.0fms used)",
+                age, sentinel,
+            )
+        elif job.job_type == "rtt_5g":
+            sentinel = float(self.probe_timeout_ms)
+            with self._cache_lock:
+                self._cache.fiveg_rtt_ms = sentinel
+                self._cache.fiveg_rtt_min_ms = sentinel
+                self._cache.fiveg_rtt_max_ms = sentinel
+                self._cache.fiveg_rtt_std_ms = 0.0
+                self._cache.fiveg_rtt_measured_at = now
+                self._cache.fiveg_rtt_job_completion_time = self.job_timeout
+                self._cache.fiveg_rtt_valid = False
+                self._cache.last_update = now
+                if self.get_plr_from_rtt_job:
+                    self._cache.fiveg_plr = 1.0
+                    self._cache.fiveg_plr_measured_at = now
+                    self._cache.fiveg_plr_valid = False
+                    self._cache.fiveg_plr_job_completion_time = self.job_timeout
+            logger.warning(
+                "5G RTT probe timed out after %.0fs (sentinel %.0fms used)",
+                age, sentinel,
+            )
+        elif job.job_type == "plr_wifi":
+            with self._cache_lock:
+                self._cache.wifi_plr = 1.0
+                self._cache.wifi_plr_measured_at = now
+                self._cache.wifi_plr_job_completion_time = self.job_timeout
+                self._cache.wifi_plr_valid = False
+                self._cache.last_update = now
+            logger.warning(
+                "WiFi path NOT ACCESSIBLE — PLR probe timed out after %.0fs "
+                "(sentinel 100%% loss used)",
+                age,
+            )
+        elif job.job_type == "plr_5g":
+            with self._cache_lock:
+                self._cache.fiveg_plr = 1.0
+                self._cache.fiveg_plr_measured_at = now
+                self._cache.fiveg_plr_job_completion_time = self.job_timeout
+                self._cache.fiveg_plr_valid = False
+                self._cache.last_update = now
+            logger.warning(
+                "5G path NOT ACCESSIBLE — PLR probe timed out after %.0fs "
+                "(sentinel 100%% loss used)",
+                age,
+            )
+
     def _poll_job_results(self):
         for job_id, job in list(self.active_jobs.items()):
+            # completed / failed jobs do not need to be considered
             if job.status != "pending":
                 continue
 
-            age = time.time() - job.submitted_at
+            now = time.time()
+            age = now - job.submitted_at 
             if age > self.job_timeout:
-                logger.warning(f"Job {job_id} ({job.job_type}) timed out after {age:.0f}s")
+                logger.warning(f"Job {job_id} ({job.job_type}) timed out after {age:.2f}s")
                 job.status = "failed"
-                # WiFi path unreachable: populate cache with worst-case sentinels so
-                # to_pmf_metrics() can still return a result and the RL agent steers away from WiFi.
-                now = time.time()
-                if job.job_type == "rtt_wifi":
-                    sentinel = float(self.probe_timeout_ms)
-                    with self._cache_lock:
-                        self._cache.wifi_rtt_ms = sentinel
-                        self._cache.wifi_rtt_min_ms = sentinel
-                        self._cache.wifi_rtt_max_ms = sentinel
-                        self._cache.wifi_rtt_std_ms = 0.0
-                        self._cache.wifi_rtt_measured_at = now
-                        self._cache.last_update = now
-                    logger.warning(
-                        "WiFi path NOT ACCESSIBLE — RTT probe timed out after %.0fs "
-                        "(sentinel %.0fms used; agent will steer away from WiFi)",
-                        age, sentinel,
-                    )
-                elif job.job_type == "plr_wifi":
-                    with self._cache_lock:
-                        self._cache.wifi_plr = 1.0
-                        self._cache.wifi_plr_measured_at = now
-                        self._cache.last_update = now
-                    logger.warning(
-                        "WiFi path NOT ACCESSIBLE — PLR probe timed out after %.0fs "
-                        "(sentinel 100%% loss used; agent will steer away from WiFi)",
-                        age,
-                    )
+                self._update_cache_for_timeout(job, now)                
                 continue
 
             try:
+                # try to poll result from PMF
                 if job.job_type.startswith("rtt_"):
                     result = self._poll_rtt_result(job_id)
                 elif job.job_type.startswith("plr_"):
@@ -542,26 +626,35 @@ class PMFPollingService:
                     continue
 
                 if isinstance(result, dict):
-                    if result.get("status") == "pending":
+                    job_status = result.get("status")
+                    if job_status == "pending":
                         logger.info(
                             f"Job {job_id} ({job.job_type}) still pending "
-                            f"(age={age:.0f}s, PMF status=pending)"
+                            f"(age={age:.0f}s, PMF status={job_status})"
                         )
                         continue
-                    # Check if we have actual measurement data (completed job)
+
+                    if job_status == "timeout":
+                        logger.warning(
+                            f"Job {job_id} ({job.job_type}) timed out internally "
+                            f"(age={age:.0f}s, PMF status={job_status})"
+                        )
+
+                    # Check if we have actual measurement data (completed or timed out job)
                     has_rtt_data = "avg_rtt_ms" in result or "mean_rtt_ms" in result or "rtt_ms" in result
                     has_plr_data = "plr_pct" in result or "plr" in result or "packet_loss_rate" in result
-                    if not (has_rtt_data or has_plr_data) and "status" not in result:
+                    if not (has_rtt_data or has_plr_data):
                         logger.info(
                             f"Job {job_id} ({job.job_type}) returned unrecognised payload "
                             f"(age={age:.0f}s): {result}"
                         )
+                        job.status = "failed"
                         continue
 
                 job.status = "completed"
                 job.result = result
                 self._update_cache_from_result(job)
-                logger.info(f"Job {job_id} ({job.job_type}) completed: {result}")
+                logger.info(f"Job {job_id} ({job.job_type}) completed after {age}s: {result}")
 
             except requests.exceptions.ConnectionError as e:
                 logger.warning(f"PMF unavailable while polling job {job_id}: {e}")
@@ -725,39 +818,65 @@ class PMFPollingService:
             return
 
         now = time.time()
+        age = now - job.submitted_at
         try:
             if job.job_type == "rtt_wifi":
                 rtt_ms = self._extract_rtt_from_result(job.result)
-                if rtt_ms is not None:
-                    rtt_min, rtt_max, rtt_std = self._extract_rtt_stats_from_result(job.result)
-                    meas_time = self._extract_measurement_time(job.result) or now
-                    with self._cache_lock:
+                loss_pct = self._safe_float(job.result.get("loss_pct"))
+                with self._cache_lock:
+                    self._cache.last_update = now
+                    self._cache.wifi_rtt_measured_at = now
+                    self._cache.wifi_rtt_job_completion_time = age
+                    if rtt_ms is not None:
+                        rtt_min, rtt_max, rtt_std = self._extract_rtt_stats_from_result(job.result)
                         self._cache.wifi_rtt_ms = rtt_ms
                         self._cache.wifi_rtt_min_ms = rtt_min
                         self._cache.wifi_rtt_max_ms = rtt_max
                         self._cache.wifi_rtt_std_ms = rtt_std
-                        self._cache.wifi_rtt_measured_at = meas_time
-                        self._cache.last_update = now
-                    logger.info(f"Updated WiFi RTT: {rtt_ms:.2f}ms")
-                else:
-                    # all probes lost (100% PLR): RTT is unmeasurable.
-                    # Use probe_timeout_ms as a high sentinel so the cache stays
-                    # fully populated and to_pmf_metrics() can return a result.
-                    loss_pct = self._safe_float(job.result.get("loss_pct"))
-                    if loss_pct is not None and loss_pct >= 100.0:
+                        logger.info(f"Updated WiFi RTT: {rtt_ms:.2f}ms")
+                    else:
                         sentinel = float(self.probe_timeout_ms)
-                        with self._cache_lock:
-                            self._cache.wifi_rtt_ms = sentinel
-                            self._cache.wifi_rtt_min_ms = sentinel
-                            self._cache.wifi_rtt_max_ms = sentinel
-                            self._cache.wifi_rtt_std_ms = 0.0
-                            self._cache.wifi_rtt_measured_at = now
-                            self._cache.last_update = now
-                        logger.warning(
-                            "WiFi path NOT ACCESSIBLE — all probes lost (100%% PLR) "
-                            "(sentinel %.0fms used; agent will steer away from WiFi)",
-                            sentinel,
-                        )
+                        self._cache.wifi_rtt_ms = sentinel
+                        self._cache.wifi_rtt_min_ms = sentinel
+                        self._cache.wifi_rtt_max_ms = sentinel
+                        self._cache.wifi_rtt_std_ms = 0.0
+                        logger.info(f"Updated WiFi RTT: {sentinel:.2f}ms (RTT was None)")
+
+                    if self.get_plr_from_rtt_job:
+                        self._cache.wifi_plr = loss_pct / 100
+                        self._cache.wifi_plr_measured_at = now
+                        self._cache.wifi_plr_valid = True
+                        self._cache.wifi_plr_job_completion_time = age
+                        logger.info(f"Updated WiFi PLR from rtt job: {loss_pct:.2f}%")
+
+            if job.job_type == "rtt_5g":
+                rtt_ms = self._extract_rtt_from_result(job.result)
+                loss_pct = self._safe_float(job.result.get("loss_pct"))
+                with self._cache_lock:
+                    self._cache.last_update = now
+                    self._cache.fiveg_rtt_measured_at = now
+                    self._cache.fiveg_rtt_job_completion_time = age
+                    if rtt_ms is not None:
+                        rtt_min, rtt_max, rtt_std = self._extract_rtt_stats_from_result(job.result)
+                        self._cache.fiveg_rtt_ms = rtt_ms
+                        self._cache.fiveg_rtt_min_ms = rtt_min
+                        self._cache.fiveg_rtt_max_ms = rtt_max
+                        self._cache.fiveg_rtt_std_ms = rtt_std
+                        logger.info(f"Updated 5G RTT: {rtt_ms:.2f}ms")
+                    else:
+                        sentinel = float(self.probe_timeout_ms)
+                        self._cache.fiveg_rtt_ms = sentinel
+                        self._cache.fiveg_rtt_min_ms = sentinel
+                        self._cache.fiveg_rtt_max_ms = sentinel
+                        self._cache.fiveg_rtt_std_ms = 0.0
+                        logger.info(f"Updated 5G RTT: {sentinel:.2f}ms (RTT was None)")
+
+                    if self.get_plr_from_rtt_job:
+                        self._cache.fiveg_plr = loss_pct / 100
+                        self._cache.fiveg_plr_measured_at = now
+                        self._cache.fiveg_plr_valid = True
+                        self._cache.fiveg_plr_job_completion_time = age
+                        logger.info(f"Updated 5G PLR from rtt job: {loss_pct:.2f}%")
 
             elif job.job_type == "rtt_5g":
                 rtt_ms = self._extract_rtt_from_result(job.result)
@@ -780,6 +899,8 @@ class PMFPollingService:
                         self._cache.wifi_plr = plr
                         self._cache.wifi_plr_measured_at = now
                         self._cache.last_update = now
+                        self._cache.wifi_plr_job_completion_time = age
+                        self._cache.wifi_plr_valid = True
                     logger.info(f"Updated WiFi PLR: {plr:.4f}")
 
             elif job.job_type == "plr_5g":
@@ -789,6 +910,8 @@ class PMFPollingService:
                         self._cache.fiveg_plr = plr
                         self._cache.fiveg_plr_measured_at = now
                         self._cache.last_update = now
+                        self._cache.fiveg_plr_job_completion_time = age
+                        self._cache.fiveg_plr_valid = True
                     logger.info(f"Updated 5G PLR: {plr:.4f}")
 
         except Exception as e:

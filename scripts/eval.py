@@ -274,8 +274,10 @@ def main() -> int:
     parser.set_defaults(dry_run=False)
     args = parser.parse_args()
 
-    if args.verbose:
-        logging.getLogger().setLevel(logging.INFO)
+    logging.basicConfig(
+        level=logging.INFO if args.verbose else logging.WARNING,
+        format="%(asctime)s %(levelname)s %(name)s: %(message)s",
+    )
 
     assert args.episodes >= 1, "There must be at least one evaluation episode"
 

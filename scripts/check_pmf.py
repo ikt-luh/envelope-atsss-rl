@@ -133,7 +133,7 @@ def check_pmf_client_metrics(
         pmf_ue_url=pmf_ue_url,
         pmf_upf_url=pmf_upf_url,
         use_polling=True,
-        poll_interval=2.0,
+        poll_interval=0.1,
         job_timeout=timeout,
         request_timeout=config.PMF_REQUEST_TIMEOUT,
         probe_count=5,
@@ -153,10 +153,9 @@ def check_pmf_client_metrics(
         metrics = client.get_metrics(session_id)
         if metrics is not None:
             client.shutdown()
-            wifi_note = " [NOT ACCESSIBLE — sentinel value]" if metrics.wifi_rtt_ms >= 500.0 else ""
             print(
                 f"  PMF metrics: OK "
-                f"(wifi_rtt={metrics.wifi_rtt_ms:.1f}ms{wifi_note}, "
+                f"(wifi_rtt={metrics.wifi_rtt_ms:.1f}ms, "
                 f"5g_rtt={metrics.fiveg_rtt_ms:.1f}ms, "
                 f"wifi_plr={metrics.wifi_plr:.1f}, "
                 f"5g_plr={metrics.fiveg_plr:.1f})"

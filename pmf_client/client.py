@@ -15,7 +15,9 @@ import numpy as np
 @dataclass
 class PMFMetrics:
     wifi_rtt_ms: float
+    wifi_valid: bool
     fiveg_rtt_ms: float
+    fiveg_valid: bool
     wifi_plr: float
     fiveg_plr: float
     timestamp: str
@@ -55,7 +57,8 @@ class PMFClientManager:
                  ue_wifi_iface: str = "",
                  ue_5g_iface: str = "",
                  use_uplink: bool = True,
-                 asynchronous: bool = True):
+                 asynchronous: bool = True,
+                 inter_job_wait_time_s: Optional[int] = None):
 
         self.dry_run = dry_run
         # TODO: Dynamic run should be replaced and controlled by scenarios applier
@@ -85,7 +88,8 @@ class PMFClientManager:
                 ue_wifi_iface=ue_wifi_iface,
                 ue_5g_iface=ue_5g_iface,
                 use_uplink=use_uplink,
-                asynchronous=asynchronous
+                asynchronous=asynchronous,
+                inter_job_wait_time_s=inter_job_wait_time_s
             )
             self.polling_service.start()
             logger.info("PMF Polling Service enabled")
@@ -154,6 +158,8 @@ class PMFClientManager:
             return PMFMetrics(
                 wifi_rtt_ms=wifi_rtt_probes.mean(),
                 fiveg_rtt_ms=fiveg_rtt_probes.mean(),
+                wifi_valid=True,
+                fiveg_valid=True,
                 wifi_plr=wifi_plr,
                 fiveg_plr=fiveg_plr,
                 timestamp="dummy_time",

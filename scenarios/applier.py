@@ -136,12 +136,15 @@ class ScenarioApplier:
         self._iperf_procs: List[subprocess.Popen] = []
         self._mpquic_traffic_gen_thread: Optional[threading.Thread] = None
         self._mpquic_traffic_gen_thread_event = threading.Event()
+        self._mpquic_traffic_gen_thread_ready = threading.Event()
 
         def _handle_signal(sig: int, _frame) -> None:
             logger.info("APL: Signal %d received — stopping.", sig)
             if self._mpquic_traffic_gen_thread is not None:
                 self._mpquic_traffic_gen_thread_event.set()
                 self._mpquic_traffic_gen_thread.join()
+                self._mpquic_traffic_gen_thread_event.clear()
+                self._mpquic_traffic_gen_thread_ready.clear()
             import sys
             sys.exit(0)
 
@@ -422,10 +425,25 @@ class ScenarioApplier:
             self._stop_user_traffic_gen()
             self._mpquic_traffic_gen_thread = threading.Thread(
                 target=run_fifo_writer,
-                args=(self.settings.mpquic_fifo_input_path, traffic_gen_mode, cfg.user_data_mbps, cfg.bursty_mbit_per_period, cfg.bursty_period_s, chunk_size, self._mpquic_traffic_gen_thread_event),
+                args=(
+                    self.settings.mpquic_fifo_input_path, 
+                    traffic_gen_mode, 
+                    cfg.user_data_mbps, 
+                    cfg.bursty_mbit_per_period, 
+                    cfg.bursty_period_s, 
+                    chunk_size,
+                    # event to stop the thread
+                    self._mpquic_traffic_gen_thread_event,
+                    # event to wait until the thread is ready
+                    self._mpquic_traffic_gen_thread_ready
+                ),
                 daemon=False,
             )
             self._mpquic_traffic_gen_thread.start()
+            wait_start = time.time()
+            while not(self._mpquic_traffic_gen_thread_ready.wait(2.0)):
+                logger.error(f"[scenarios] Waiting for FIFO thread since {time.time() - wait_start:.2f}s")
+
 
         # cross-traffic
 
@@ -557,7 +575,7 @@ class ScenarioManager:
         cfg = sample_random_config(self.settings, self.rng)
         self.applier.apply(cfg)
         self.current_config = cfg
-        if self._pmf_client is not None and hasattr(self._pmf_client, "flush_cache"):
+        if self._pmf_client is not None:
             self._pmf_client.flush_cache()
 
         self.watcher.reset_bytes_sent()
