@@ -7,6 +7,7 @@ from pathlib import Path
 from typing import Any, Dict, List
 
 import matplotlib
+import numpy as np
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 
@@ -343,6 +344,90 @@ def plot_bytes_sent(records: List[Dict[str, Any]], out_path: Path) -> None:
     ax.set_xlabel("Step")
 
     fig.suptitle("Total bytes sent per episode", fontsize=12, fontweight="bold")
+    fig.tight_layout()
+    fig.savefig(out_path, dpi=150)
+    plt.close(fig)
+
+
+def plot_bitrate_sent(records: List[Dict[str, Any]], out_path: Path) -> None:
+    ok = [r for r in records if r.get("ok", True)]
+    if not ok:
+        return
+
+    elapsed_time = np.array([float(r["elapsed_s"])  if r.get("elapsed_s")  is not None else None for r in ok])
+
+    def diff_array(arr):
+        arr[1:] = (arr[1:] - arr[:-1])
+        arr[0] = np.nan
+        arr[arr < 0] = np.nan
+
+    diff_array(elapsed_time)
+
+    def bytes_to_bitrate(arr):
+        diff_array(arr)
+        arr[:] = (arr / elapsed_time) * 8 / 1_000_000
+
+    bytes_sent_fifo = np.array([float(r["bytes_sent_fifo"])  if r.get("bytes_sent_fifo")  is not None else None for r in ok])
+    bytes_sent_wifi =  np.array([float(r["bytes_sent_wifi"]) if r.get("bytes_sent_wifi") is not None else None for r in ok])
+    bytes_sent_fiveg  = np.array([float(r["bytes_sent_fiveg"])  if r.get("bytes_sent_fiveg")  is not None else None for r in ok])
+
+    bytes_to_bitrate(bytes_sent_fifo)
+    bytes_to_bitrate(bytes_sent_wifi)
+    bytes_to_bitrate(bytes_sent_fiveg)
+
+    steps = list(range(1, len(ok) + 1))
+    boundaries = []
+    labels = []
+    prev_label = None
+    for i, r in enumerate(ok):
+        lbl = r.get("scenario_label")
+        if lbl and lbl != prev_label:
+            boundaries.append(i + 1)
+            labels.append(lbl)
+            prev_label = lbl
+
+    FIFO_COLOR = "#29CF42"
+
+    fig, axes = plt.subplots(3, 1, figsize=(14, 6), sharex=True)
+
+    def _plot_series(ax, xs, ys, color, label):
+        pairs = [(x, y) for x, y in zip(xs, ys) if y is not None]
+        if pairs:
+            px, py = zip(*pairs)
+            ax.plot(px, py, color=color, linewidth=0.9, alpha=0.8, label=label)
+
+    ax = axes[0]
+    _plot_series(ax, steps, bytes_sent_fifo,  FIFO_COLOR, "MPQUIC input FIFO")
+    for b in boundaries:
+        ax.axvline(b, color="grey", linewidth=0.6, linestyle=":", alpha=0.6)
+    ax.set_ylabel("Bitrate [Mbps]")
+    ax.set_ylim(bottom=0)
+    ax.legend(fontsize=8)
+    ax.grid(alpha=0.25)
+
+    ax = axes[1]
+    _plot_series(ax, steps, bytes_sent_wifi,  WIFI_COLOR, "WiFi interface")
+    for b in boundaries:
+        ax.axvline(b, color="grey", linewidth=0.6, linestyle=":", alpha=0.6)
+    ax.set_ylabel("Bitrate [Mbps]")
+    ax.set_ylim(bottom=0)
+    ax.legend(fontsize=8)
+    ax.grid(alpha=0.25)
+
+    ax = axes[2]
+    _plot_series(ax, steps, bytes_sent_fiveg,  FIVEG_COLOR, "5G interface")
+    for i, (b, lbl) in enumerate(zip(boundaries, labels)):
+        ax.axvline(b, color="grey", linewidth=0.6, linestyle=":", alpha=0.6)
+        ax.text(b + 0.5, 0.1, lbl, fontsize=5, rotation=90, color="grey",
+                va="bottom", ha="left", clip_on=True, transform=ax.get_xaxis_transform())
+    ax.set_ylabel("Bitrate [Mbps]")
+    ax.set_ylim(bottom=0)
+    ax.legend(fontsize=8)
+    ax.grid(alpha=0.25)
+
+    ax.set_xlabel("Step")
+
+    fig.suptitle("Bitrate across steps", fontsize=12, fontweight="bold")
     fig.tight_layout()
     fig.savefig(out_path, dpi=150)
     plt.close(fig)

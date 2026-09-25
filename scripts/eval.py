@@ -41,6 +41,7 @@ from rl_agent.lstm_agent import MPQUICLSTMAgent
 from rl_agent.ppo_agent import MPQUICPPOAgent
 from rl_agent.rl_env import RLEnv, build_observation, get_timestamp_str
 from scripts.plot_utils import (
+    plot_bitrate_sent,
     plot_bytes_sent,
     plot_decision_time_histogram,
     plot_decision_time_over_time,
@@ -311,7 +312,7 @@ def main() -> int:
     print(f"[eval] Agent: {agent_type}" + (f" | Checkpoint: {checkpoint_path}" if checkpoint_path else f" | Heuristic: {args.heuristic}"))
     print(f"[eval] Steps: {args.steps} | Decision Interval: {interval_s}s | Session: {session_id}")
     if agent_type == "lstm":
-        print(f"[eval] Sequence length: {args.sequence_len}")
+        print(f"[eval] Sequence length: plot_bitrate_sent{args.sequence_len}")
     if agent_type == "heuristic":
         print(f"[eval] Heuristic: {args.heuristic} (alpha={args.heuristic_alpha})")
     if args.with_scenarios:
@@ -568,6 +569,7 @@ def main() -> int:
             plot_eval_network_conditions(all_records, run_dir / "eval_network_conditions.png")
             plot_eval_timeline_conditions_action(all_records, run_dir / "eval_timeline_conditions_actions.png")
             plot_bytes_sent(all_records, run_dir / "bytes_sent.png")
+            plot_bitrate_sent(all_records, run_dir / "bitrate_sent.png")
 
     if episode_summaries:
         plot_reward_by_scenario(episode_summaries, run_dir / "reward_by_scenario.png")
