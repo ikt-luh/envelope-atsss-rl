@@ -12,7 +12,7 @@ from rl_agent.rl_env import RLEnv
 
 logger = logging.getLogger(__name__)
 
-HEURISTIC_TYPES = ("lb-rtt-min", "lb-plr-min", "lb-utility", "lb-random")
+HEURISTIC_TYPES = ("lb-rtt-min", "lb-plr-min", "lb-utility", "lb-random", "lb-wifi", "lb-fiveg", "lb-equal")
 
 
 class HeuristicAgent:
@@ -71,6 +71,12 @@ class HeuristicAgent:
             wifi_ratio = self._lb_utility(observation)
         elif self.heuristic_type == "lb-random":
             wifi_ratio = self._lb_random_uniform()
+        elif self.heuristic_type == "lb-wifi":
+            wifi_ratio = 1.0
+        elif self.heuristic_type == "lb-fiveg":
+            wifi_ratio = 0.0
+        elif self.heuristic_type == "lb-equal":
+            wifi_ratio = 0.5
         else:
             raise RuntimeError(f"Unhandled heuristic_type: {self.heuristic_type}")
 
