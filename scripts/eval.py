@@ -130,7 +130,7 @@ def _run_eval_steps(
     next_delta_bytes_wifi, next_delta_bytes_fiveg = 0, 0
     # print(f"[eval] Getting the initial metrics for step 0 took {(next_metrics_time) * 1000} ms")
     smooth_metrics_time = next_metrics_time
-    smooth_metrics_time_alpha = 0.9
+    smooth_metrics_time_alpha = 0.5
     for step in range(num_steps):
         metrics, metrics_time = next_metrics, next_metrics_time
         delta_bytes_wifi, delta_bytes_fiveg = next_delta_bytes_wifi, next_delta_bytes_fiveg

@@ -72,7 +72,7 @@ PMF_POLL_INTERVAL: float = _env_float("PMF_POLL_INTERVAL", 0.1)
 PMF_ASYNCHRONOUS: bool = _env_bool("PMF_ASYNCHRONOUS", False)
 
 # pmf measurement parameters
-PMF_PROBE_COUNT: int = _env_int("PMF_PROBE_COUNT", 10)
+PMF_PROBE_COUNT: int = _env_int("PMF_PROBE_COUNT", 5)
 PMF_PROBE_TIMEOUT_MS: int = _env_int("PMF_PROBE_TIMEOUT_MS", 1000)
 PMF_REQUEST_TIMEOUT: float = _env_float("PMF_REQUEST_TIMEOUT", 5.0)
 PMF_JOB_TIMEOUT: float = _env_float("PMF_JOB_TIMEOUT", 30.0)

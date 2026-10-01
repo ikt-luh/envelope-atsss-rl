@@ -160,7 +160,7 @@ class RLEnv(gym.Env):
         )
         self.episode_start_time = None
         self.get_metrics_time_smooth = None
-        self.get_metrics_time_alpha = 0.9
+        self.get_metrics_time_alpha = 0.5
 
     def reset(self, *, seed=None, options=None):
         super().reset(seed=seed)
