@@ -317,7 +317,7 @@ def main() -> int:
         print(f"[eval] Heuristic: {args.heuristic} (alpha={args.heuristic_alpha})")
     if args.with_scenarios:
         print(f"[eval] Scenarios: ON (config={args.scenario_config}, settle={args.settle_s}s)")
-    print(f"[eval] PMF probe count: {config.PMF_PROBE_COUNT}, poll interval {config.PMF_POLL_INTERVAL}")
+    print(f"[eval] PMF probe count: {config.PMF_PROBE_COUNT}, probe timeout {config.PMF_PROBE_TIMEOUT_MS}, poll interval {config.PMF_POLL_INTERVAL}")
     print(f"[eval] Output: {run_dir}")
 
     pmf_client = PMFClientManager(

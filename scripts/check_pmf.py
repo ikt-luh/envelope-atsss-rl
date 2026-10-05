@@ -137,7 +137,7 @@ def check_pmf_client_metrics(
         job_timeout=timeout,
         request_timeout=config.PMF_REQUEST_TIMEOUT,
         probe_count=5,
-        probe_timeout_ms=500,
+        probe_timeout_ms=config.PMF_PROBE_TIMEOUT_MS,
         cache_max_age=config.PMF_CACHE_MAX_AGE,
         upf_ip=config.PMF_UPF_IP,
         ue_wifi_ip=config.PMF_UE_WIFI_IP,
