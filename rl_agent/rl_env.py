@@ -114,7 +114,7 @@ class RLEnv(gym.Env):
     """Base environment with shared step, reset, reward, and early termination logic."""
 
     # Initial ratio applied upon episode reset
-    INITIAL_WIFI_RATIO: float = 1
+    INITIAL_WIFI_RATIO: float = 0.5
 
     def __init__(
         self,
