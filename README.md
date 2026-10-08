@@ -23,7 +23,7 @@ The agent observes network metrics and outputs a continuous ratio that determine
 
 Before deployment, the following external projects need to be set up
 * ENVELOPE Performance Measurement Function (PMF): Provides network measurements that form the observations of the agent.
-* ENVELOPE MPQUIC/ATSSS: The RL agent sends its decisions to the ATSSS AUE, which interacts with MPQUIC.
+* [ENVELOPE MPQUIC/ATSSS](https://github.com/ikt-luh/envelope-atsss-mpquic): The RL agent sends its decisions to the ATSSS AUE, which interacts with MPQUIC.
 
 ## Project Structure
 
