@@ -18,5 +18,3 @@ loss_pairs:
   - { wifi: 0.0, fiveg: 0.0 }
   - { wifi: 2.0, fiveg: 0.0 }
   - { wifi: 5.0, fiveg: 0.0 }
-  - { wifi: 0.0, fiveg: 2.0 }
-  - { wifi: 0.0, fiveg: 5.0 }
