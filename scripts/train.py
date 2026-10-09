@@ -108,6 +108,7 @@ def build_agent(
     scenario_manager=None,
     episodes_per_config: int = 1,
     aue_client=None,
+    discrete_n=None
 ):
     if algo == "ppo":
         agent = MPQUICPPOAgent()
@@ -139,6 +140,7 @@ def build_agent(
         scenario_manager=scenario_manager,
         episodes_per_config=episodes_per_config,
         aue_client=aue_client,
+        discrete_n=discrete_n
     )
     return agent
 
@@ -223,6 +225,7 @@ def main() -> int:
     parser.add_argument("--sequence-len", type=int, default=None)
     parser.add_argument("--dry-run", dest='dry_run', action='store_true')
     parser.set_defaults(dry_run=False)
+    parser.add_argument("--discrete-n", type=int, default=None)
     parser.add_argument("--session-id", default=None)
     parser.add_argument("--success-reward-threshold", type=float, default=None)
     parser.add_argument("--tag", default="run")
@@ -266,7 +269,12 @@ def main() -> int:
     print(f"[train] Run dir: {run_dir}")
     print(f"[train] Config: {cfg_path}")
     print(f"[train] Algo={algo} iterations={iterations} checkpoint_freq={checkpoint_freq}")
-    print(f"[train] Agent info: decision interval {config.DECISION_INTERVAL}")
+    if args.discrete_n is None:
+        action_space_str = "continuous"
+    else:
+        assert args.discrete_n >= 2
+        action_space_str = f"discrete (n={args.discrete_n})"
+    print(f"[train] Agent info: decision interval {config.DECISION_INTERVAL}, action space: {action_space_str}")
 
     scenario_config_file = cfg.get("scenario_config_file", args.scenario_config)
     cfg["scenario_config_file"] = scenario_config_file
@@ -379,6 +387,7 @@ def main() -> int:
         scenario_manager=scenario_manager,
         episodes_per_config=episodes_per_config,
         aue_client=aue_client,
+        discrete_n=args.discrete_n
     )
 
     if args.checkpoint:

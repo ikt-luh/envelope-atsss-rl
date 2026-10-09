@@ -16,7 +16,7 @@ from ray.tune.logger import UnifiedLogger
 from ray.tune.registry import register_env
 
 from rl_agent.ray_utils import ensure_ray_initialized
-from rl_agent.rl_env import LogRLEnvMetricsCallback, MPQUICLSTMEnv
+from rl_agent.rl_env import LogRLEnvMetricsCallback, MPQUICLSTMEnv, RLEnv
 
 from ray.rllib.policy.sample_batch import SampleBatch
 
@@ -53,6 +53,7 @@ def _create_lstm_env(env_config):
     max_steps = registry_data.get("max_steps", 1000)
     scenario_manager = registry_data.get("scenario_manager")
     episodes_per_config = registry_data.get("episodes_per_config", 1)
+    discrete_n = registry_data.get("discrete_n")
     env = MPQUICLSTMEnv(
         decision_interval, pmf, sid,
         reward_params=reward_params,
@@ -61,6 +62,7 @@ def _create_lstm_env(env_config):
         max_steps=max_steps,
         scenario_manager=scenario_manager,
         episodes_per_config=episodes_per_config,
+        discrete_n=discrete_n,
     )
     if records is not None:
         from rl_agent.recording_env import RecordingEnv
@@ -115,6 +117,7 @@ class MPQUICLSTMAgent:
         max_steps: int = 1000,
         scenario_manager=None,
         episodes_per_config: int = 1,
+        discrete_n=None,
         **kwargs,
     ):
         # validate num_workers: PMF client and scenario manager are stored in a
@@ -131,6 +134,8 @@ class MPQUICLSTMAgent:
         self.pmf_client = pmf_client
         self.session_id = session_id
         self.scenario_manager = scenario_manager
+        self.discrete_n = discrete_n
+
         # store in global registry to avoid serialization issues
         env_key = f"MPQUICLSTMEnv_{uuid.uuid4().hex[:8]}"
         _env_registry[env_key] = {
@@ -145,6 +150,7 @@ class MPQUICLSTMAgent:
             "max_steps": max_steps,
             "scenario_manager": scenario_manager,
             "episodes_per_config": episodes_per_config,
+            "discrete_n": discrete_n
         }
 
         # store key as instance variable for later use
@@ -198,6 +204,8 @@ class MPQUICLSTMAgent:
         action, self._lstm_state, _ = self.agent.compute_single_action(
             observation, state=self._lstm_state, full_fetch=True
         )
+        if self.discrete_n is not None:
+            action = RLEnv.discrete_to_continuous_action(action, self.discrete_n)
         return np.array([action], dtype=np.float32)
 
     def train(self, num_iterations: int = 100, checkpoint_freq: int = 10):

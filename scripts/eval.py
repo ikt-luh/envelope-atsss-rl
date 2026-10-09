@@ -245,6 +245,7 @@ def main() -> int:
     parser.add_argument("--session-id", default=None, help="Session ID (default: from config)")
     parser.add_argument("--tag", default="policy-eval", help="Tag for output directory")
     parser.add_argument("--output-dir", default=None, help="Output directory (default: results/evaluation/<agent>/<timestamp>_<tag>)")
+    parser.add_argument("--discrete-n", type=int, default=None)
     parser.add_argument("--reward-type", default=None, help="Reward type: logarithmic or linear (default: from config)")
     parser.add_argument("--reward-r-max", type=float, default=None, help="Reward r_max for logarithmic (default: from config)")
     parser.add_argument("--reward-epsilon", type=float, default=None, help="Reward epsilon for logarithmic (default: from config)")
@@ -360,14 +361,14 @@ def main() -> int:
         aue_client = AUEClient(config.AUE_URL, timeout=config.AUE_TIMEOUT)
 
     if agent_type == "ppo":
-        agent = MPQUICPPOAgent(window_size=config.PPO_OBS_WINDOW_SIZE)
-        agent.initialize(decision_interval=config.DECISION_INTERVAL, pmf_client=pmf_client, session_id=session_id)
+        agent = MPQUICPPOAgent()
+        agent.initialize(decision_interval=config.DECISION_INTERVAL, pmf_client=pmf_client, session_id=session_id, window_size=config.PPO_OBS_WINDOW_SIZE, discrete_n=args.discrete_n)
         agent.load_checkpoint(str(checkpoint_path))
         if args.no_exploration:
             agent.agent.get_policy().config["explore"] = False
     elif agent_type == "lstm":
         agent = MPQUICLSTMAgent(sequence_len=args.sequence_len)
-        agent.initialize(decision_interval=config.DECISION_INTERVAL, pmf_client=pmf_client, session_id=session_id)
+        agent.initialize(decision_interval=config.DECISION_INTERVAL, pmf_client=pmf_client, session_id=session_id, discrete_n=args.discrete_n)
         agent.load_checkpoint(str(checkpoint_path))
         if args.no_exploration:
             agent.agent.get_policy().config["explore"] = False

@@ -127,6 +127,7 @@ class RLEnv(gym.Env):
         max_steps: int = 1000,
         scenario_manager: Optional[ScenarioManager] = None,
         episodes_per_config: int = 1,
+        discrete_n: Optional[bool] = None,
         aue_client=None,
     ):
         super().__init__()
@@ -153,11 +154,18 @@ class RLEnv(gym.Env):
             high=OBS_HIGH.copy(),
             dtype=np.float32,
         )
-        self.action_space = spaces.Box(
-            low=np.array([0.0]),
-            high=np.array([1.0]),
-            dtype=np.float32,
-        )
+        self.discrete_n = discrete_n
+        self.action_is_discrete = discrete_n is not None
+        if self.action_is_discrete:
+            assert discrete_n >= 2
+            self.action_space = spaces.Discrete(discrete_n)
+        else:
+            self.action_space = spaces.Box(
+                low=np.array([0.0]),
+                high=np.array([1.0]),
+                dtype=np.float32,
+            )
+
         self.episode_start_time = None
         self.get_metrics_time_smooth = None
         self.get_metrics_time_alpha = 0.5
@@ -199,7 +207,10 @@ class RLEnv(gym.Env):
 
     def step(self, action):
         self.current_step += 1
-        wifi_ratio = float(np.clip(action[0], 0.0, 1.0))
+        if self.action_is_discrete:
+            wifi_ratio = self.discrete_to_continuous_action(action.item(), self.discrete_n)
+        else:
+            wifi_ratio = float(np.clip(action.item(), 0.0, 1.0))
 
         # first apply the action in the environment
         timestamp_decision_sent = get_timestamp_str()
@@ -296,6 +307,11 @@ class RLEnv(gym.Env):
         return build_observation(metrics, previous_action=previous_action, delta_bytes_wifi=delta_bytes_wifi, delta_bytes_fiveg=delta_bytes_fiveg)
 
     @staticmethod
+    def discrete_to_continuous_action(action: int, n: int) -> float:
+        assert n >= 2
+        return float(action) / (n - 1)
+
+    @staticmethod
     def get_reward_and_metrics(observation: np.ndarray, wifi_ratio: float, prev_wifi_ratio: float, r_max=1.0, epsilon=1e-6, alpha=25) -> float:
         wifi_rtt = float(observation[0])
         fiveg_rtt = float(observation[1])
@@ -354,8 +370,9 @@ class MPQUICPPOEnv(RLEnv):
         max_steps: int = 1000,
         scenario_manager: Any = None,
         episodes_per_config: int = 1,
-        window_size: int = 10,
+        discrete_n: Optional[bool] = None,
         aue_client=None,
+        window_size: int = 10,
     ):
         super().__init__(
             decision_interval=decision_interval,
@@ -367,6 +384,7 @@ class MPQUICPPOEnv(RLEnv):
             max_steps=max_steps,
             scenario_manager=scenario_manager,
             episodes_per_config=episodes_per_config,
+            discrete_n=discrete_n,
             aue_client=aue_client,
         )
         self.window_size = max(1, int(window_size))

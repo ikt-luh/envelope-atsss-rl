@@ -16,7 +16,7 @@ from ray.tune.logger import UnifiedLogger
 from ray.tune.registry import register_env
 
 from rl_agent.ray_utils import ensure_ray_initialized
-from rl_agent.rl_env import LogRLEnvMetricsCallback, MPQUICPPOEnv
+from rl_agent.rl_env import LogRLEnvMetricsCallback, MPQUICPPOEnv, RLEnv
 
 
 logger = logging.getLogger(__name__)
@@ -40,7 +40,7 @@ def _get_results_dir(agent_name: str) -> str:
 def _create_ppo_env(env_config):
     key = env_config.get("env_key", "MPQUICPPOEnv_default")
     registry_data = _env_registry.get(key, {})
-        
+
     # print(f"ENV CREATION: Got registry {registry_data}")
 
     decision_interval = registry_data.get("decision_interval")
@@ -55,6 +55,7 @@ def _create_ppo_env(env_config):
     scenario_manager = registry_data.get("scenario_manager")
     episodes_per_config = registry_data.get("episodes_per_config", 1)
     aue_client = registry_data.get("aue_client")
+    discrete_n = registry_data.get("discrete_n")
 
     # print(f"ENV CREATION: PMF exists: {pmf is not None}")
 
@@ -69,6 +70,7 @@ def _create_ppo_env(env_config):
         episodes_per_config=episodes_per_config,
         window_size=window_size,
         aue_client=aue_client,
+        discrete_n=discrete_n
     )
     if records is not None:
         from rl_agent.recording_env import RecordingEnv
@@ -77,12 +79,10 @@ def _create_ppo_env(env_config):
 
 
 class MPQUICPPOAgent:
-    def __init__(self, config: Optional[Dict[str, Any]] = None, window_size: int = 10):
+    def __init__(self, config: Optional[Dict[str, Any]] = None):
         self.config = config or self._default_config()
         self.agent = None
-        self.env = None
-        self._window_size = window_size
-        self._obs_buffer: list = []  # rolling window for inference stacking
+        self.obs_buffer: list = []  # rolling window for inference stacking
 
     def _default_config(self) -> Dict[str, Any]:
         return {
@@ -121,6 +121,7 @@ class MPQUICPPOAgent:
         episodes_per_config: int = 1,
         window_size: int = 10,
         aue_client=None,
+        discrete_n=None,
         **kwargs,
     ):
         # validate num_workers: PMF client and scenario manager are stored in a
@@ -138,6 +139,7 @@ class MPQUICPPOAgent:
         self.session_id = session_id
         self.scenario_manager = scenario_manager
         self.window_size = window_size
+        self.discrete_n = discrete_n
 
         # store in global registry to avoid serialization issues
         env_key = f"MPQUICPPOEnv_{uuid.uuid4().hex[:8]}"
@@ -155,11 +157,12 @@ class MPQUICPPOAgent:
             "episodes_per_config": episodes_per_config,
             "window_size": window_size,
             "aue_client": aue_client,
+            "discrete_n": discrete_n
         }
-        
+
         # store key as instance variable for later use
         self._env_key = env_key
-        
+
         register_env("MPQUICPPOEnv", _create_ppo_env)
 
         ensure_ray_initialized()
@@ -195,15 +198,17 @@ class MPQUICPPOAgent:
             raise RuntimeError("Agent not initialized. Call initialize() first.")
 
         # maintain rolling window matching training env (window_size stacked obs)
-        self._obs_buffer.append(observation.copy())
-        if len(self._obs_buffer) > self._window_size:
-            self._obs_buffer.pop(0)
+        self.obs_buffer.append(observation.copy())
+        if len(self.obs_buffer) > self.window_size:
+            self.obs_buffer.pop(0)
         # pad with copies of the first obs if buffer not full yet (same as env reset)
-        while len(self._obs_buffer) < self._window_size:
-            self._obs_buffer.insert(0, self._obs_buffer[0].copy())
-        stacked = np.concatenate(self._obs_buffer[-self._window_size:])
+        while len(self.obs_buffer) < self.window_size:
+            self.obs_buffer.insert(0, self.obs_buffer[0].copy())
+        stacked = np.concatenate(self.obs_buffer[-self.window_size:])
 
         action = self.agent.compute_single_action(stacked)
+        if self.discrete_n is not None:
+            action = RLEnv.discrete_to_continuous_action(action, self.discrete_n)
         return np.array(action, dtype=np.float32)
 
     def train(self, num_iterations: int = 100, checkpoint_freq: int = 10):
