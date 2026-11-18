@@ -242,7 +242,7 @@ class RLEnv(gym.Env):
 
         # get a new observation that reflects the network conditions after applying our action
         next_observation = self._get_observation(
-            self.prev_wifi_ratio,
+            wifi_ratio,
             delta_bytes_wifi=delta_bytes_sent['bytes_sent_wifi'],
             delta_bytes_fiveg=delta_bytes_sent['bytes_sent_fiveg']
         )
