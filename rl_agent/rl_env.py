@@ -110,11 +110,124 @@ def get_timestamp_str() -> str:
     return timestamp.replace("+00:00", "Z")
 
 
+def _fmt_opt_float(v: Optional[float]) -> str:
+    if v is None:
+        return "n/a"
+    return f"{v:.2f}"
+
+
+class StepPacer:
+    """
+    Paces steps in the ATSSS RL environment according to a given time interval.
+
+    For example, assume the goal is to apply an action each 1s. After applying an action, 
+    the agent should wait for approximately 1 second, then get a new observation and 
+    apply an action for the new observation.
+
+    The problem is that the time it takes to get an observation and the time it takes to make
+    a decision (including pauses due to training steps being performed) is unknown.
+
+    This class keeps an exponential moving average of the time it takes to get an observation,
+    and measures the time until the next iteration, and aims to set the wait time accordingly.
+
+    This class is designed to be used as follows:
+
+    ```
+    # init pacer at beginning of your code
+    pacer = StepPacer(...)
+
+    for episode in range(100):
+        with pacer(reset=True):
+            initial_observation = get_observation()
+
+        for step in range(100):
+            ...
+            with pacer:
+                next_observation = get_observation()
+    ```
+    """
+    def __init__(self, interval_s: float, ema_alpha: float):
+        """
+        Args:
+            interval_s (float): the step interval in seconds  
+            ema_alpha (float): alpha for exponential moving average (alpha * new + (1-alpha) * old)
+        """
+        self.interval_s = interval_s
+        self.alpha = ema_alpha
+        assert self.alpha >= 0 and self.alpha <= 1
+
+        self.sleep = True
+
+        self.time_enter = None
+        self.time_exit = None
+        self.duration_observation = None
+        self.duration_observation_smooth = None
+        self.duration_outside = None
+        self.time_start = time.monotonic()
+
+    def ema(self, old_value, new_value):
+        if old_value is None:
+            return new_value
+
+        return self.alpha * new_value + (1 - self.alpha) * old_value
+
+    def __call__(self, reset=False):
+        if reset:
+            self.sleep = False
+            self.time_enter = None
+            self.time_exit = None
+            self.duration_outside = None
+            self.time_start = time.monotonic()
+        return self
+
+    def _timing_str(self):
+        return (
+            f"observation: {_fmt_opt_float(self.duration_observation)} (ema {_fmt_opt_float(self.duration_observation_smooth)}), "
+            f"outside: {_fmt_opt_float(self.duration_outside)}"
+        )
+
+    def __enter__(self):
+        now = time.monotonic()
+        if self.time_exit is not None:
+            # time between two subsequent steps outside the with block,
+            # including the agent's decision-making
+            self.duration_outside = now - self.time_exit
+
+        if self.sleep and self.interval_s is not None:
+            sleep_time = self.interval_s
+            if self.duration_outside is not None:
+                sleep_time -= self.duration_outside
+            if self.duration_observation_smooth is not None:
+                sleep_time -= self.duration_observation_smooth
+
+            if sleep_time >= 0:
+                time.sleep(sleep_time)
+            else:
+                logger.warning(
+                    f"Decision interval of {self.interval_s} s may be too short. " + self._timing_str()
+                )
+        else:
+            sleep_time = None
+
+        logger.info(f"t = {now - self.time_start:.2f}s: {self._timing_str()}, sleep {_fmt_opt_float(sleep_time)}s")
+
+        self.time_enter = time.monotonic()
+        self.sleep = True
+        return self
+
+    def __exit__(self, type, value, tb):
+        self.time_exit = time.monotonic()
+        # time for getting the observation
+        self.duration_observation = self.time_exit - self.time_enter
+        self.duration_observation_smooth = self.ema(self.duration_observation_smooth, self.duration_observation)
+
+
 class RLEnv(gym.Env):
     """Base environment with shared step, reset, reward, and early termination logic."""
 
     # Initial ratio applied upon episode reset
     INITIAL_WIFI_RATIO: float = 0.5
+    EMA_ALPHA: float = 0.1
 
     def __init__(
         self,
@@ -166,9 +279,7 @@ class RLEnv(gym.Env):
                 dtype=np.float32,
             )
 
-        self.episode_start_time = None
-        self.get_metrics_time_smooth = None
-        self.get_metrics_time_alpha = 0.5
+        self.pacer = StepPacer(self.decision_interval, RLEnv.EMA_ALPHA)
 
     def reset(self, *, seed=None, options=None):
         super().reset(seed=seed)
@@ -196,9 +307,12 @@ class RLEnv(gym.Env):
         if self.pmf_client is not None and self.scenario_manager is None:
             self.pmf_client.dry_run_sample_random_conditions()
 
-        self.episode_start_time = time.time()
+        with self.pacer(reset=True):
+            metrics = self.pmf_client.get_metrics(self.session_id)
+
+        self.current_observation = build_observation(metrics, RLEnv.INITIAL_WIFI_RATIO, 0, 0)
         self.bytes_sent_dict = self.get_bytes_sent_dict()  # to compute the diff later
-        self.current_observation = self._get_observation(RLEnv.INITIAL_WIFI_RATIO, 0, 0)
+
         self._update_obs_for_step(self.current_observation)
         return self._get_obs_for_step(), dict(self._scenario_info)
 
@@ -220,34 +334,30 @@ class RLEnv(gym.Env):
             except Exception as e:
                 logger.warning("AUE send_ratio failed: %s", e)
 
-        # wait a bit until we have (approximately) reached our decision interval
-        if self.decision_interval is not None:
-            sleep_time = self.decision_interval - self.get_metrics_time_smooth
-            if sleep_time > 0:
-                time.sleep(sleep_time)
-                logging.debug(f"Sleeping for {int(sleep_time * 1000)} ms to approximate {self.decision_interval} s decision interval")
-            else:
-                logging.warning(f"The decision interval ({self.decision_interval} s) might be too short. Getting the observation took {self.get_metrics_time_smooth} s.")
-
-        # check when action was applied
-        if self.aue_client is not None:
-            timestamp_decision_applied = self.aue_client.get_timestamp()
-        else:
-            timestamp_decision_applied = timestamp_decision_sent
+        # the metrics reflect the network conditions after applying the action
+        # the pacer might sleep some time before we get the metrics
+        with self.pacer:
+            metrics = self.pmf_client.get_metrics(self.session_id)
 
         # update traffic stats
         new_bytes_sent_dict = self.get_bytes_sent_dict()
         delta_bytes_sent = TrafficWatcher.delta(self.bytes_sent_dict, new_bytes_sent_dict)
         self.bytes_sent_dict = new_bytes_sent_dict
 
-        # get a new observation that reflects the network conditions after applying our action
-        next_observation = self._get_observation(
+        next_observation = build_observation(
+            metrics,
             wifi_ratio,
             delta_bytes_wifi=delta_bytes_sent['bytes_sent_wifi'],
             delta_bytes_fiveg=delta_bytes_sent['bytes_sent_fiveg']
         )
         self._update_obs_for_step(next_observation)
         timestamp_observation = get_timestamp_str()
+
+        # record when action was applied
+        if self.aue_client is not None:
+            timestamp_decision_applied = self.aue_client.get_timestamp()
+        else:
+            timestamp_decision_applied = timestamp_decision_sent
 
         # get the reward based this observation
         reward, self._last_reward_components = RLEnv.get_reward_and_metrics(
@@ -282,29 +392,6 @@ class RLEnv(gym.Env):
             info["sequence_len"] = len(self.observation_history)
         self.current_observation = next_observation
         return self._get_obs_for_step(), reward, done, truncated, info
-
-    def _get_observation(self, previous_action, delta_bytes_wifi, delta_bytes_fiveg) -> np.ndarray:
-        if self.pmf_client is None:
-            raise RuntimeError(
-                "get_observation failed. PMF is not connected. Training requires a PMF client. "
-            )
-        t0 = time.time()
-        metrics = self.pmf_client.get_metrics(self.session_id)
-        get_metrics_time = time.time() - t0
-
-        if self.get_metrics_time_smooth is None:
-            self.get_metrics_time_smooth = get_metrics_time
-        else:
-            self.get_metrics_time_smooth = self.get_metrics_time_alpha * self.get_metrics_time_smooth + (1 - self.get_metrics_time_alpha) * get_metrics_time
-
-        logging.debug(f"{self.current_step}: t = {time.time() - self.episode_start_time}, delta_t_obs = {get_metrics_time} s, delta_t_obs_avg = {self.get_metrics_time_smooth} s")
-
-        if metrics is None:
-            raise RuntimeError(
-                "No metrics available. "
-                "Ensure PMF is running, reachable, and polling has produced cached metrics."
-            )
-        return build_observation(metrics, previous_action=previous_action, delta_bytes_wifi=delta_bytes_wifi, delta_bytes_fiveg=delta_bytes_fiveg)
 
     @staticmethod
     def discrete_to_continuous_action(action: int, n: int) -> float:

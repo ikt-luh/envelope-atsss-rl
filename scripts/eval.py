@@ -39,7 +39,7 @@ from pmf_client.client import PMFClientManager
 from rl_agent.heuristic_agent import HeuristicAgent
 from rl_agent.lstm_agent import MPQUICLSTMAgent
 from rl_agent.ppo_agent import MPQUICPPOAgent
-from rl_agent.rl_env import RLEnv, build_observation, get_timestamp_str
+from rl_agent.rl_env import RLEnv, StepPacer, build_observation, get_timestamp_str
 from scripts.plot_utils import (
     plot_bitrate_sent,
     plot_bytes_sent,
@@ -84,9 +84,9 @@ def _run_eval_steps(
     aue_client,
     session_id: str,
     num_steps: int,
-    interval_s: float,
     reward_params: Dict[str, Any],
     start_t: float,
+    pacer: StepPacer,
     *,
     scenario_label: Optional[str] = None,
     traffic_class: Optional[str] = None,
@@ -107,40 +107,29 @@ def _run_eval_steps(
         "stability_term": None, "reward_total": None,
     }
 
-    def get_metrics_and_time():
-        metrics_requested_t = time.time()
-        metrics = pmf_client.get_metrics(session_id)
-        metrics_time = (time.time() - metrics_requested_t)
-        return metrics, metrics_time
-
+    wifi_ratio = RLEnv.INITIAL_WIFI_RATIO
     if aue_client is not None:
         try:
-            aue_client.send_ratio(RLEnv.INITIAL_WIFI_RATIO)
+            aue_client.send_ratio(wifi_ratio)
         except Exception as e:
             print("[eval] ERROR: AUE send_ratio failed: %s", e)
-    last_action = RLEnv.INITIAL_WIFI_RATIO
 
     if watcher is not None:
         watcher.reset_bytes_sent()
 
-    bytes_sent_dict = TrafficWatcher.get_bytes_sent_dict(watcher)  # to compute the diff later
+    with pacer(reset=True):
+        metrics = pmf_client.get_metrics(session_id)
 
-    # get initial metrics
-    next_metrics, next_metrics_time = get_metrics_and_time()
-    next_delta_bytes_wifi, next_delta_bytes_fiveg = 0, 0
-    # print(f"[eval] Getting the initial metrics for step 0 took {(next_metrics_time) * 1000} ms")
-    smooth_metrics_time = next_metrics_time
-    smooth_metrics_time_alpha = 0.5
+    next_obs = build_observation(metrics, wifi_ratio, 0, 0)
+    bytes_sent_dict = TrafficWatcher.get_bytes_sent_dict(watcher)
+
     for step in range(num_steps):
-        metrics, metrics_time = next_metrics, next_metrics_time
-        delta_bytes_wifi, delta_bytes_fiveg = next_delta_bytes_wifi, next_delta_bytes_fiveg
-        step_t0 = time.time()
+        prev_wifi_ratio = wifi_ratio
+        obs = next_obs
 
-        obs = build_observation(metrics, last_action, delta_bytes_wifi=delta_bytes_wifi, delta_bytes_fiveg=delta_bytes_fiveg)
-        t0 = time.time()
-        action = agent.select_action(obs)
-        decision_time_ms = (time.time() - t0) * 1000.0
-        wifi_ratio = float(np.clip(action.item(), 0.0, 1.0))
+        step_t0 = time.monotonic()
+        wifi_ratio = float(np.clip(agent.select_action(obs).item(), 0.0, 1.0))
+        decision_time_ms = (time.monotonic() - step_t0) * 1000.0
         fiveg_ratio = 1.0 - wifi_ratio
 
         timestamp_decision_sent = get_timestamp_str()
@@ -150,25 +139,10 @@ def _run_eval_steps(
             except Exception as e:
                 print("[eval] ERROR: AUE send_ratio failed: %s", e)
 
-        if interval_s is not None:
-            # Add wait time so that we take a step approximately every interval_s seconds
-            wait_time = max(0, interval_s - smooth_metrics_time)
-            # print(f"[eval] Waiting for {(wait_time) * 1000} ms")
-            if smooth_metrics_time > interval_s:
-                print(f"[eval] WARNING: PMF metrics time {smooth_metrics_time} exceeds decision interval {interval_s}")
-            time.sleep(wait_time)
-
-        # check when action was applied
-        if aue_client is not None:
-            timestamp_decision_applied = aue_client.get_timestamp()
-        else:
-            timestamp_decision_applied = timestamp_decision_sent
-
         # get metrics of the next step that depend on the agent's current action
-        next_metrics, next_metrics_time = get_metrics_and_time()
+        with pacer:
+            metrics = pmf_client.get_metrics(session_id)
         timestamp_observation = get_timestamp_str()
-        # print(f"[eval] Getting the next metrics took {(next_metrics_time) * 1000} ms")
-        smooth_metrics_time = smooth_metrics_time_alpha * smooth_metrics_time + (1 - smooth_metrics_time_alpha) * next_metrics_time
 
         new_bytes_sent_dict = TrafficWatcher.get_bytes_sent_dict(watcher)
         bytes_sent_delta = TrafficWatcher.delta(bytes_sent_dict, new_bytes_sent_dict)
@@ -176,20 +150,22 @@ def _run_eval_steps(
         next_delta_bytes_fiveg = bytes_sent_delta['bytes_sent_fiveg']
         bytes_sent_dict = new_bytes_sent_dict
 
-        # print(bytes_sent_dict, new_bytes_sent_dict, bytes_sent_delta)
+        next_obs = build_observation(metrics, wifi_ratio, next_delta_bytes_wifi, next_delta_bytes_fiveg)
+        reward, reward_metrics = RLEnv.get_reward_and_metrics(next_obs, wifi_ratio, prev_wifi_ratio, **reward_params)
 
-        reward, reward_metrics = RLEnv.get_reward_and_metrics(obs, wifi_ratio, prev_wifi_ratio, **reward_params)
+        # check when action was applied
+        if aue_client is not None:
+            timestamp_decision_applied = aue_client.get_timestamp()
+        else:
+            timestamp_decision_applied = timestamp_decision_sent
 
-        prev_wifi_ratio = wifi_ratio
-        last_action = action.item()
-
-        latency_ms = (time.time() - step_t0) * 1000
+        latency_ms = (time.monotonic() - step_t0) * 1000
         rec = {
             "step": step,
-            "elapsed_s": round(time.time() - start_t, 3),
+            "elapsed_s": round(time.monotonic() - start_t, 3),
             "latency_ms": round(latency_ms, 3),
             "decision_time_ms": round(float(decision_time_ms), 3),
-            "metrics_time_ms": round(float(next_metrics_time * 1000), 3),
+            "metrics_time_ms": round(float(pacer.duration_observation * 1000), 3),
             "ok": True,
             "wifi_ratio": wifi_ratio,
             "fiveg_ratio": fiveg_ratio,
@@ -411,7 +387,8 @@ def main() -> int:
 
     all_records: List[Dict[str, Any]] = []
     episode_summaries: List[Dict[str, Any]] = []
-    start_t = time.time()
+    start_t = time.monotonic()
+    pacer = StepPacer(interval_s=interval_s, ema_alpha=RLEnv.EMA_ALPHA)
 
     try:
         if args.with_scenarios and scenario_configs and scenario_applier:
@@ -444,7 +421,7 @@ def main() -> int:
 
                     sc_records = _run_eval_steps(
                         agent, agent_type, pmf_client, aue_client, session_id,
-                        args.steps, interval_s, reward_params, start_t,
+                        args.steps, reward_params, start_t, pacer,
                         scenario_label=label,
                         traffic_class=tc,
                         watcher=traffic_watcher
@@ -476,7 +453,7 @@ def main() -> int:
             # standard eval (no scenarios, single episode)
             sc_records = _run_eval_steps(
                 agent, agent_type, pmf_client, aue_client, session_id,
-                args.steps, interval_s, reward_params, start_t,
+                args.steps, reward_params, start_t, pacer
             )
             all_records.extend(sc_records)
     finally:
