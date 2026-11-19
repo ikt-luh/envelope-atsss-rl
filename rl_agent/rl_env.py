@@ -499,7 +499,7 @@ class MPQUICPPOEnv(RLEnv):
         _, info = super().reset(seed=seed, options=options)
         # add initial placeholders to observation history
         placeholder = self.current_observation.copy()
-        placeholder[-1] = OBS_FLAG_VALID
+        placeholder[-1] = OBS_FLAG_INVALID
         while len(self.observation_history) < self.window_size:
             self.observation_history.insert(0, placeholder)
         return self._get_obs_for_step(), info
