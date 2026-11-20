@@ -110,10 +110,10 @@ def get_timestamp_str() -> str:
     return timestamp.replace("+00:00", "Z")
 
 
-def _fmt_opt_float(v: Optional[float]) -> str:
+def _fmt_opt_float(v: Optional[float], default="n/a", suffix="") -> str:
     if v is None:
-        return "n/a"
-    return f"{v:.2f}"
+        return default
+    return f"{v:.2f}{suffix}"
 
 
 class StepPacer:
@@ -156,14 +156,13 @@ class StepPacer:
         self.alpha = ema_alpha
         assert self.alpha >= 0 and self.alpha <= 1
 
-        self.sleep = True
-
         self.time_enter = None
         self.time_exit = None
         self.duration_observation = None
         self.duration_observation_smooth = None
         self.duration_outside = None
         self.time_start = time.monotonic()
+        self.step = 0
 
     def ema(self, old_value, new_value):
         if old_value is None:
@@ -173,17 +172,17 @@ class StepPacer:
 
     def __call__(self, reset=False):
         if reset:
-            self.sleep = False
             self.time_enter = None
             self.time_exit = None
             self.duration_outside = None
             self.time_start = time.monotonic()
+            self.step = 0
         return self
 
     def _timing_str(self):
         return (
-            f"observation: {_fmt_opt_float(self.duration_observation)} (ema {_fmt_opt_float(self.duration_observation_smooth)}), "
-            f"outside: {_fmt_opt_float(self.duration_outside)}"
+            f"observation {_fmt_opt_float(self.duration_observation, suffix="s")} (ema {_fmt_opt_float(self.duration_observation_smooth, suffix="s")}), "
+            f"outside {_fmt_opt_float(self.duration_outside, suffix="s")}"
         )
 
     def __enter__(self):
@@ -193,7 +192,7 @@ class StepPacer:
             # including the agent's decision-making
             self.duration_outside = now - self.time_exit
 
-        if self.sleep and self.interval_s is not None:
+        if self.interval_s is not None:
             sleep_time = self.interval_s
             if self.duration_outside is not None:
                 sleep_time -= self.duration_outside
@@ -209,10 +208,9 @@ class StepPacer:
         else:
             sleep_time = None
 
-        logger.info(f"t = {now - self.time_start:.2f}s: {self._timing_str()}, sleep {_fmt_opt_float(sleep_time)}s")
+        logger.info(f"{self.step}: time {now - self.time_start:.2f}s, {self._timing_str()}, sleep {_fmt_opt_float(sleep_time)}s")
 
         self.time_enter = time.monotonic()
-        self.sleep = True
         return self
 
     def __exit__(self, type, value, tb):
@@ -220,13 +218,13 @@ class StepPacer:
         # time for getting the observation
         self.duration_observation = self.time_exit - self.time_enter
         self.duration_observation_smooth = self.ema(self.duration_observation_smooth, self.duration_observation)
+        self.step += 1
 
 
 class RLEnv(gym.Env):
     """Base environment with shared step, reset, reward, and early termination logic."""
 
-    # Initial ratio applied upon episode reset
-    INITIAL_WIFI_RATIO: float = 0.5
+    EVAL_INITIAL_WIFI_RATIO: float = 1.0
     EMA_ALPHA: float = 0.1
 
     def __init__(
@@ -284,7 +282,12 @@ class RLEnv(gym.Env):
     def reset(self, *, seed=None, options=None):
         super().reset(seed=seed)
         self.current_step = 0
-        self.prev_wifi_ratio = RLEnv.INITIAL_WIFI_RATIO
+
+        # WARNING: The environment should only be used during training. We randomize the initial wifi ratio
+        #          to let the agent encounter more situations
+        wifi_ratio = self.np_random.uniform(0, 1)
+        self.prev_wifi_ratio = wifi_ratio
+
         self._reward_history = []
         self._last_reward_components = {}
         self._episode_idx += 1
@@ -292,7 +295,7 @@ class RLEnv(gym.Env):
         # first apply the action in the environment
         if self.aue_client is not None:
             try:
-                self.aue_client.send_ratio(RLEnv.INITIAL_WIFI_RATIO)
+                self.aue_client.send_ratio(wifi_ratio)
             except Exception as e:
                 logger.warning("AUE send_ratio failed: %s", e)
 
@@ -307,11 +310,24 @@ class RLEnv(gym.Env):
         if self.pmf_client is not None and self.scenario_manager is None:
             self.pmf_client.dry_run_sample_random_conditions()
 
+        # we start tracking the bytes sent here, right before waiting to get the metrics
+        self.bytes_sent_dict = self.get_bytes_sent_dict()
+
         with self.pacer(reset=True):
             metrics = self.pmf_client.get_metrics(self.session_id)
 
-        self.current_observation = build_observation(metrics, RLEnv.INITIAL_WIFI_RATIO, 0, 0)
-        self.bytes_sent_dict = self.get_bytes_sent_dict()  # to compute the diff later
+        new_bytes_sent_dict = self.get_bytes_sent_dict()
+        delta_bytes_sent = TrafficWatcher.delta(self.bytes_sent_dict, new_bytes_sent_dict)
+        self.bytes_sent_dict = new_bytes_sent_dict
+
+        self.current_observation = build_observation(
+            metrics,
+            wifi_ratio,
+            delta_bytes_wifi=delta_bytes_sent['bytes_sent_wifi'],
+            delta_bytes_fiveg=delta_bytes_sent['bytes_sent_fiveg']
+        )
+
+        logger.info(f"{self.current_step}: initial wifi_ratio {wifi_ratio:.3f}")
 
         self._update_obs_for_step(self.current_observation)
         return self._get_obs_for_step(), dict(self._scenario_info)
@@ -358,6 +374,8 @@ class RLEnv(gym.Env):
             timestamp_decision_applied = self.aue_client.get_timestamp()
         else:
             timestamp_decision_applied = timestamp_decision_sent
+
+        logger.info(f"{self.current_step}: wifi_ratio {wifi_ratio:.3f}, sent {timestamp_decision_sent[11:]}, applied {timestamp_decision_applied[11:]}, obs {timestamp_observation[11:]}")
 
         # get the reward based this observation
         reward, self._last_reward_components = RLEnv.get_reward_and_metrics(

@@ -16,7 +16,7 @@ from ray.tune.logger import UnifiedLogger
 from ray.tune.registry import register_env
 
 from rl_agent.ray_utils import ensure_ray_initialized
-from rl_agent.rl_env import LogRLEnvMetricsCallback, MPQUICPPOEnv, RLEnv
+from rl_agent.rl_env import OBS_FLAG_INVALID, LogRLEnvMetricsCallback, MPQUICPPOEnv, RLEnv
 
 
 logger = logging.getLogger(__name__)
@@ -193,6 +193,9 @@ class MPQUICPPOAgent:
 
         logger.info("PPO RL Agent initialized")
 
+    def reset(self):
+        self.obs_buffer = []
+
     def select_action(self, observation: np.ndarray) -> np.ndarray:
         if self.agent is None:
             raise RuntimeError("Agent not initialized. Call initialize() first.")
@@ -202,9 +205,12 @@ class MPQUICPPOAgent:
         if len(self.obs_buffer) > self.window_size:
             self.obs_buffer.pop(0)
         # pad with copies of the first obs if buffer not full yet (same as env reset)
-        while len(self.obs_buffer) < self.window_size:
-            self.obs_buffer.insert(0, self.obs_buffer[0].copy())
-        stacked = np.concatenate(self.obs_buffer[-self.window_size:])
+        if len(self.obs_buffer) < self.window_size:
+            placeholder = self.obs_buffer[0].copy()
+            placeholder[-1] = OBS_FLAG_INVALID
+            while len(self.obs_buffer) < self.window_size:
+                self.obs_buffer.insert(0, placeholder)
+        stacked = np.concatenate(self.obs_buffer)
 
         action = self.agent.compute_single_action(stacked)
         if self.discrete_n is not None:

@@ -63,8 +63,7 @@ from scripts.train_utils import (
     plot_scenario_distribution,
 )
 
-# import logging
-# logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
 
 
 def _detect_agent(checkpoint_path: Optional[Path]) -> str:
@@ -107,7 +106,7 @@ def _run_eval_steps(
         "stability_term": None, "reward_total": None,
     }
 
-    wifi_ratio = RLEnv.INITIAL_WIFI_RATIO
+    wifi_ratio = RLEnv.EVAL_INITIAL_WIFI_RATIO
     if aue_client is not None:
         try:
             aue_client.send_ratio(wifi_ratio)
@@ -117,11 +116,23 @@ def _run_eval_steps(
     if watcher is not None:
         watcher.reset_bytes_sent()
 
+    bytes_sent_dict = TrafficWatcher.get_bytes_sent_dict(watcher)
+
     with pacer(reset=True):
         metrics = pmf_client.get_metrics(session_id)
 
-    next_obs = build_observation(metrics, wifi_ratio, 0, 0)
-    bytes_sent_dict = TrafficWatcher.get_bytes_sent_dict(watcher)
+    new_bytes_sent_dict = TrafficWatcher.get_bytes_sent_dict(watcher)
+    delta_bytes_sent = TrafficWatcher.delta(bytes_sent_dict, new_bytes_sent_dict)
+    bytes_sent_dict = new_bytes_sent_dict
+
+    next_obs = build_observation(
+        metrics,
+        wifi_ratio,
+        delta_bytes_wifi=delta_bytes_sent['bytes_sent_wifi'],
+        delta_bytes_fiveg=delta_bytes_sent['bytes_sent_fiveg']
+    )
+
+    logger.info(f"0: initial wifi_ratio {wifi_ratio:.3f}")
 
     for step in range(num_steps):
         prev_wifi_ratio = wifi_ratio
@@ -158,6 +169,8 @@ def _run_eval_steps(
             timestamp_decision_applied = aue_client.get_timestamp()
         else:
             timestamp_decision_applied = timestamp_decision_sent
+
+        logger.info(f"{step + 1}: wifi_ratio {wifi_ratio:.3f}, sent {timestamp_decision_sent[11:]}, applied {timestamp_decision_applied[11:]}, obs {timestamp_observation[11:]}")
 
         latency_ms = (time.monotonic() - step_t0) * 1000
         rec = {
@@ -410,11 +423,6 @@ def main() -> int:
 
                     if args.dry_run:
                         pmf_client.dry_run_reset_metrics_to_base()
-
-                    # reset LSTM hidden state at each scenario boundary so the
-                    # agent starts each scenario without stale temporal context
-                    if agent_type == "lstm" and hasattr(agent, "reset_state"):
-                        agent.reset_state()
 
                     if hasattr(agent, "reset"):
                         agent.reset()

@@ -191,8 +191,8 @@ class MPQUICLSTMAgent:
         #return zero LSTM state [h, c] in the format RLlib expects.
         return self.agent.get_policy().get_initial_state()
 
-    def reset_state(self) -> None:
-        #reset LSTM hidden state to zeros. Call at episode boundaries.
+    def reset(self) -> None:
+        # reset LSTM hidden state to zeros. Call at episode boundaries.
         if self.agent is not None:
             self._lstm_state = self._get_initial_state()
 

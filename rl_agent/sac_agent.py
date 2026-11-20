@@ -16,7 +16,7 @@ from ray.tune.registry import register_env
 
 from rl_agent.lstm_agent import _get_results_dir
 from rl_agent.ray_utils import ensure_ray_initialized
-from rl_agent.rl_env import MPQUICPPOEnv
+from rl_agent.rl_env import OBS_FLAG_INVALID, MPQUICPPOEnv
 
 
 logger = logging.getLogger(__name__)
@@ -187,9 +187,12 @@ class MPQUICSACAgent:
         if len(self._obs_buffer) > self._window_size:
             self._obs_buffer.pop(0)
         # pad with copies of the first obs if buffer not full yet (same as env reset)
-        while len(self._obs_buffer) < self._window_size:
-            self._obs_buffer.insert(0, self._obs_buffer[0].copy())
-        stacked = np.concatenate(self._obs_buffer[-self._window_size:])
+        if len(self.obs_buffer) < self.window_size:
+            placeholder = self.obs_buffer[0].copy()
+            placeholder[-1] = OBS_FLAG_INVALID
+            while len(self.obs_buffer) < self.window_size:
+                self.obs_buffer.insert(0, placeholder)
+        stacked = np.concatenate(self.obs_buffer)
 
         action = self.agent.compute_single_action(stacked)
         return np.array(action, dtype=np.float32)
