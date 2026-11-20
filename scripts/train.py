@@ -98,7 +98,6 @@ def build_agent(
     session_id: str,
     pmf_client: PMFClientManager,
     training_records: List[Dict[str, Any]],
-    training_start_time: float,
     early_termination_reward_threshold=None,
     early_termination_window: int = 50,
     reward_params: Dict[str, Any] | None = None,
@@ -130,7 +129,6 @@ def build_agent(
         pmf_client,
         session_id=session_id,
         training_records=training_records,
-        training_start_time=training_start_time,
         early_termination_reward_threshold=early_termination_reward_threshold,
         early_termination_window=early_termination_window,
         reward_params=reward_params or {},
@@ -227,7 +225,6 @@ def main() -> int:
     parser.set_defaults(dry_run=False)
     parser.add_argument("--discrete-n", type=int, default=None)
     parser.add_argument("--session-id", default=None)
-    parser.add_argument("--success-reward-threshold", type=float, default=None)
     parser.add_argument("--tag", default="run")
     parser.add_argument("--run-dir", default=None, help="Output directory (default: auto-generated)")
     parser.add_argument("--checkpoint", default=None, help="Path to checkpoint for warm-start (resume training)")
@@ -285,7 +282,6 @@ def main() -> int:
         "checkpoint_freq": checkpoint_freq,
         "sequence_len": sequence_len if algo == "lstm" else None,
         "session_id": session_id,
-        "success_reward_threshold": args.success_reward_threshold,
         "agent_config": agent_override,
         "config_file": str(cfg_path),
         "ray_logs_dir": str(ray_logs_dir),
@@ -377,7 +373,6 @@ def main() -> int:
         session_id=session_id,
         pmf_client=pmf_client,
         training_records=training_records,
-        training_start_time=train_start_time,
         early_termination_reward_threshold=early_term_threshold,
         early_termination_window=early_term_window,
         reward_params=reward_params,
@@ -417,12 +412,12 @@ def main() -> int:
             iter_records = training_records[records_before:]
             row = extract_metrics(
                 result, i, iter_s, elapsed_s,
-                args.success_reward_threshold,
                 iter_records=iter_records,
             )
             rows.append(row)
+
             new_ep_rows, episode_idx = extract_episode_rows(
-                result, i, episode_idx, args.success_reward_threshold
+                result, i, episode_idx
             )
             episode_rows.extend(new_ep_rows)
 
@@ -509,15 +504,6 @@ def main() -> int:
             round(sum(r["episode_reward_total"] for r in episode_rows) / len(episode_rows), 3)
             if episode_rows else None
         ),
-        "success_rate_overall": (
-            round(
-                sum(r["success"] for r in episode_rows if r.get("success") is not None)
-                / len([r for r in episode_rows if r.get("success") is not None]),
-                4,
-            )
-            if any(r.get("success") is not None for r in episode_rows)
-            else None
-        ),
         "run_dir": str(run_dir),
     }
     (run_dir / "summary.json").write_text(json.dumps(to_jsonable(summary), indent=2))
@@ -545,16 +531,20 @@ def main() -> int:
                 run_dir / "latency_over_time.png",
                 title="Training Step Latency Over Time",
             )
-            if any(r.get("decision_time_ms") is not None for r in training_records):
+            if any(r.get("inter_step_time_ms") is not None for r in training_records):
                 plot_decision_time_over_time(
                     training_records,
-                    run_dir / "decision_time_over_time.png",
-                    title="Training Decision Time Over Time",
+                    run_dir / "inter_step_time.png",
+                    "inter_step_time_ms",
+                    "Inter-Step Time (ms)",
+                    title="Training Inter-Step Time",
                 )
                 plot_decision_time_histogram(
                     training_records,
-                    run_dir / "decision_time_histogram.png",
-                    title="Training Decision Time Distribution",
+                    run_dir / "inter_step_time_histogram.png",
+                    "inter_step_time_ms",
+                    "Inter-Step Time (ms)",
+                    title="Training Inter-Step Time Distribution",
                 )
             plot_ratio(training_records, run_dir / "ratio_over_time.png")
             plot_network_distribution(training_records, run_dir / "network_distribution.png")
@@ -580,7 +570,7 @@ def main() -> int:
 
         print(f"[train] Plots saved to {run_dir}")
 
-    print(f"\n[train] Done.")
+    print("\n[train] Done.")
     return 1 if failed else 0
 
 

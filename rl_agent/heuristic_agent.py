@@ -43,7 +43,6 @@ class HeuristicAgent:
         pmf_client=None,
         session_id: str = "default",
         training_records=None,
-        training_start_time=0.0,
         early_termination_reward_threshold=None,
         early_termination_window: int = 50,
     ):

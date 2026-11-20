@@ -77,7 +77,11 @@ def to_jsonable(value: Any) -> Any:
 
 
 STEP_CSV_COLUMNS = [
-    "elapsed_s", "step", "episode_idx", "step_in_episode", "latency_ms", "decision_time_ms",
+    "episode_idx",
+    "step",
+    "experiment_elapsed_s",
+    "episode_elapsed_s",
+    "step_time_ms", "inter_step_time_ms",
     "wifi_rtt_ms", "fiveg_rtt_ms", "wifi_plr", "fiveg_plr",
     "wifi_rtt_min_ms", "wifi_rtt_max_ms", "wifi_rtt_std_ms",
     "fiveg_rtt_min_ms", "fiveg_rtt_max_ms", "fiveg_rtt_std_ms",
@@ -97,15 +101,21 @@ STEP_CSV_COLUMNS = [
     "fiveg_loss_pct",
     "wifi_rate_limit_mbps",
     "fiveg_rate_limit_mbps",
-    "cross_traffic_mbps",
-    "cross_traffic_on_wifi",
+    "wifi_valid",
+    "fiveg_valid",
     "user_data_mode",
     "user_data_mbps",
     "bursty_mbit_per_period",
     "bursty_period_s",
-    "bytes_sent_wifi", "bytes_sent_fiveg",
-    "timestamp_decision_sent",
-    "timestamp_decision_applied",
+    "delta_bytes_sent_fifo",
+    "delta_bytes_sent_wifi",
+    "delta_bytes_sent_fiveg",
+    "delta_time_monotonic",
+    "pacer_sleep_time_ms",
+    "pacer_outside_time_ms",
+    "pacer_obs_time_ms",
+    "timestamp_ratio_sent",
+    "timestamp_ratio_applied",
     "timestamp_observation",
 ]
 
@@ -176,7 +186,6 @@ def extract_metrics(
     iteration_idx: int,
     iter_s: float,
     elapsed_s: float,
-    success_reward_threshold: float | None,
     iter_records: List[Dict[str, Any]] | None = None,
 ) -> Dict[str, Any]:
     env_runners = result.get("env_runners", {}) if isinstance(result, dict) else {}
@@ -188,18 +197,10 @@ def extract_metrics(
         episode_len_mean = env_runners.get("episode_len_mean")
 
     episodes_this_iter = env_runners.get("episodes_this_iter")
-    hist_stats = env_runners.get("hist_stats", {}) if isinstance(env_runners, dict) else {}
-    reward_hist = hist_stats.get("episode_reward", []) if isinstance(hist_stats, dict) else []
 
     custom_metrics = result.get("custom_metrics", {}) if isinstance(result, dict) else {}
     if not custom_metrics and isinstance(env_runners, dict):
         custom_metrics = env_runners.get("custom_metrics", {}) or {}
-    success_rate_iter = custom_metrics.get("success_rate_mean")
-    if success_rate_iter is None:
-        success_rate_iter = custom_metrics.get("success_rate")
-    if success_rate_iter is None and success_reward_threshold is not None and reward_hist:
-        successes = sum(1 for r in reward_hist if r >= success_reward_threshold)
-        success_rate_iter = successes / len(reward_hist)
 
     if reward_mean is None:
         reward_mean = env_runners.get("episode_reward_mean")
@@ -216,9 +217,7 @@ def extract_metrics(
         "episode_reward_min": reward_min,
         "episode_reward_max": reward_max,
         "episode_len_mean": episode_len_mean,
-        "episodes_total": result.get("episodes_total") or env_runners.get("num_episodes"),
         "episodes_this_iter": episodes_this_iter,
-        "success_rate_iter": success_rate_iter,
         "timesteps_total": result.get("timesteps_total"),
         "num_env_steps_sampled": result.get("num_env_steps_sampled"),
         "num_env_steps_trained": result.get("num_env_steps_trained"),
@@ -238,30 +237,28 @@ def extract_episode_rows(
     result: Dict[str, Any],
     iteration_idx: int,
     start_episode_idx: int,
-    success_reward_threshold: float | None,
 ) -> Tuple[List[Dict[str, Any]], int]:
     env_runners = result.get("env_runners", {}) if isinstance(result, dict) else {}
     hist_stats = env_runners.get("hist_stats", {}) if isinstance(env_runners, dict) else {}
     rewards = hist_stats.get("episode_reward", []) if isinstance(hist_stats, dict) else []
     lengths = hist_stats.get("episode_lengths", []) if isinstance(hist_stats, dict) else []
 
-    count = min(len(rewards), len(lengths))
+    n = env_runners.get("episodes_this_iter")
+    if n is not None:
+        rewards, lengths = rewards[-n:], lengths[-n:]
+
     rows: List[Dict[str, Any]] = []
     ep_idx = start_episode_idx
-    for i in range(count):
+    for i in range(n):
         ep_idx += 1
         reward = rewards[i]
         length = lengths[i]
-        success = None
-        if success_reward_threshold is not None:
-            success = 1 if reward >= success_reward_threshold else 0
         rows.append(
             {
                 "episode_index": ep_idx,
                 "iteration": iteration_idx,
                 "episode_reward_total": reward,
                 "episode_steps": length,
-                "success": success,
             }
         )
     return rows, ep_idx

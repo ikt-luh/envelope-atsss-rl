@@ -6,86 +6,79 @@ import time
 from typing import Any, Dict, List
 
 import gymnasium as gym
+import numpy as np
 
 from rl_agent.rl_env import OBS_DIM
 
 
 class RecordingEnv(gym.Wrapper):
 
-    def __init__(self, env: gym.Env, records: List[Dict[str, Any]], start_time: float):
+    def __init__(self, env: gym.Env, records: List[Dict[str, Any]]):
         super().__init__(env)
         self._records = records
-        self._start_time = start_time
-        self._episode_start = start_time
+        now_monotonic = time.monotonic()
+        self._start_time = now_monotonic
+        self._episode_start_monotonic = now_monotonic
         self._obs_ready_time: float | None = None
 
     def reset(self, *, seed=None, options=None):
-        self._episode_start = time.time()
+        self._episode_start_monotonic = time.monotonic()
         obs, info = self.env.reset(seed=seed, options=options)
         # Timestamp when a fresh observation becomes available to the policy.
-        self._obs_ready_time = time.time()
+        self._obs_ready_time = time.monotonic()
         return obs, info
 
     def step(self, action):
-        action_received_t = time.time()
-        decision_time_ms = None
+        action_received_t = time.monotonic()
+        inter_step_time_ms = None
         if self._obs_ready_time is not None:
-            decision_time_ms = max(0.0, (action_received_t - self._obs_ready_time) * 1000.0)
-        t0 = time.time()
+            inter_step_time_ms = max(0.0, (action_received_t - self._obs_ready_time) * 1000.0)
+
+        before_env_step_monotonic = time.monotonic()
         obs, reward, terminated, truncated, info = self.env.step(action)
-        step_duration_ms = (time.time() - t0) * 1000.0
-        elapsed_s = time.time() - self._start_time
-        # the next observation is now available to the policy.
-        self._obs_ready_time = time.time()
+        after_env_step_monotonic = time.monotonic()
 
-        flat_obs = obs[-1] if (hasattr(obs, "ndim") and obs.ndim == 2) else obs
+        step_time_ms = (after_env_step_monotonic - before_env_step_monotonic) * 1000.0
 
+        self._obs_ready_time = after_env_step_monotonic
         record: Dict[str, Any] = {
-            "elapsed_s": round(elapsed_s, 3),
+            "experiment_elapsed_s": after_env_step_monotonic - self._start_time,
+            "episode_elapsed_s": after_env_step_monotonic - self._episode_start_monotonic,
             "step": info.get("step"),
             "episode_idx": info.get("episode_idx"),
-            "step_in_episode": info.get("step_in_episode", info.get("step")),
-            "latency_ms": round(step_duration_ms, 3),
-            "decision_time_ms": round(decision_time_ms, 3) if decision_time_ms is not None else None,
+            "step_time_ms": step_time_ms,
+            "inter_step_time_ms": inter_step_time_ms if inter_step_time_ms is not None else None,
         }
 
-        if flat_obs is not None and hasattr(flat_obs, "__len__") and len(flat_obs) >= OBS_DIM:
-            record["wifi_rtt_ms"] = round(float(flat_obs[0]) * 1000.0, 4)
-            record["fiveg_rtt_ms"] = round(float(flat_obs[1]) * 1000.0, 4)
-            record["wifi_plr"] = round(float(flat_obs[2]), 6)
-            record["fiveg_plr"] = round(float(flat_obs[3]), 6)
-            record["wifi_rtt_min_ms"] = round(float(flat_obs[4]) * 1000.0, 4)
-            record["wifi_rtt_max_ms"] = round(float(flat_obs[5]) * 1000.0, 4)
-            record["wifi_rtt_std_ms"] = round(float(flat_obs[6]) * 1000.0, 4)
-            record["fiveg_rtt_min_ms"] = round(float(flat_obs[7]) * 1000.0, 4)
-            record["fiveg_rtt_max_ms"] = round(float(flat_obs[8]) * 1000.0, 4)
-            record["fiveg_rtt_std_ms"] = round(float(flat_obs[9]) * 1000.0, 4)
-            record["observation_age_ms"] = round(float(flat_obs[10]) * 1000.0, 3)
-        else:
-            for k in ("wifi_rtt_ms", "fiveg_rtt_ms", "wifi_plr", "fiveg_plr",
-                       "wifi_rtt_min_ms", "wifi_rtt_max_ms", "wifi_rtt_std_ms",
-                       "fiveg_rtt_min_ms", "fiveg_rtt_max_ms", "fiveg_rtt_std_ms",
-                       "observation_age_ms"):
-                record[k] = None
-
-        record["wifi_ratio"] = info.get("wifi_ratio")
-        record["fiveg_ratio"] = info.get("fiveg_ratio")
-
-        record["weighted_rtt_ms"] = info.get("weighted_rtt_ms")
-        record["weighted_plr"] = info.get("weighted_plr")
-        record["delta_action"] = info.get("delta_action")
-
-        record["rtt_term"] = info.get("rtt_term")
-        record["plr_term"] = info.get("plr_term")
-        record["stability_term"] = info.get("stability_term")
-        record["reward_total"] = info.get("reward_total")
-
-        record["bytes_sent_fifo"] = info.get("bytes_sent_fifo")
-        record["bytes_sent_wifi"] = info.get("bytes_sent_wifi")
-        record["bytes_sent_fiveg"] = info.get("bytes_sent_fiveg")
+        # handle both, windows of observations (latest observations at the end), and single observations
+        flat_obs = np.array(obs).reshape(-1)[-OBS_DIM:]
+        record["wifi_rtt_ms"] = float(flat_obs[0]) * 1000.0
+        record["fiveg_rtt_ms"] = float(flat_obs[1]) * 1000.0
+        record["wifi_plr"] = float(flat_obs[2])
+        record["fiveg_plr"] = float(flat_obs[3])
+        record["wifi_rtt_min_ms"] = float(flat_obs[4]) * 1000.0
+        record["wifi_rtt_max_ms"] = float(flat_obs[5]) * 1000.0
+        record["wifi_rtt_std_ms"] = float(flat_obs[6]) * 1000.0
+        record["fiveg_rtt_min_ms"] = float(flat_obs[7]) * 1000.0
+        record["fiveg_rtt_max_ms"] = float(flat_obs[8]) * 1000.0
+        record["fiveg_rtt_std_ms"] = float(flat_obs[9]) * 1000.0
 
         for k, v in info.items():
             if k.startswith("scenario_") or k in (
+                # general
+                "wifi_ratio",
+                "fiveg_ratio",
+                # whether measurements are valid
+                "wifi_valid",
+                "fiveg_valid",
+                # reward metrics
+                "weighted_rtt_ms",
+                "weighted_plr",
+                "delta_action",
+                "rtt_term",
+                "plr_term",
+                "stability_term",
+                "reward_total",
                 # scenarios
                 "traffic_class",
                 "cross_traffic_mbps",
@@ -105,9 +98,19 @@ class RecordingEnv(gym.Wrapper):
                 "bursty_mbit_per_period",
                 "bursty_period_s",
                 # timestamp strings
-                "timestamp_decision_sent",
-                "timestamp_decision_applied",
+                "timestamp_ratio_sent",
+                "timestamp_ratio_applied",
                 "timestamp_observation",
+                # traffic watcher stats
+                "delta_bytes_sent_fifo",
+                "delta_bytes_sent_wifi",
+                "delta_bytes_sent_fiveg",
+                "delta_time_monotonic",
+                # additional obs and pacer stats
+                "pacer_sleep_time_ms",
+                "pacer_outside_time_ms",
+                "pacer_obs_time_ms",
+                "observation_age_ms",
             ):
                 record[k] = v
 

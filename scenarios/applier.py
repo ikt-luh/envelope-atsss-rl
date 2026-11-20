@@ -535,12 +535,14 @@ class TrafficWatcher:
             return dict(
                 bytes_sent_fifo=0,
                 bytes_sent_wifi=0,
-                bytes_sent_fiveg=0
+                bytes_sent_fiveg=0,
+                time_monotonic=time.monotonic()
             )
         return dict(
             bytes_sent_fifo=watcher.get_bytes_sent_fifo(),
             bytes_sent_wifi=watcher.get_bytes_sent_wifi(),
-            bytes_sent_fiveg=watcher.get_bytes_sent_fiveg()
+            bytes_sent_fiveg=watcher.get_bytes_sent_fiveg(),
+            time_monotonic=time.monotonic()
         )
 
     @staticmethod
@@ -548,7 +550,7 @@ class TrafficWatcher:
         delta = {}
         for k in bytes_sent_now:
             if k in bytes_sent_past:
-                delta[k] = bytes_sent_now[k] - bytes_sent_past[k]
+                delta[f"delta_{k}"] = bytes_sent_now[k] - bytes_sent_past[k]
         return delta
 
 

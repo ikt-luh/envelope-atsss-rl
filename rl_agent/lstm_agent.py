@@ -46,7 +46,6 @@ def _create_lstm_env(env_config):
     pmf = registry_data.get("pmf_client")
     sid = registry_data.get("session_id", "default")
     records = registry_data.get("training_records")
-    start_time = registry_data.get("training_start_time", 0.0)
     early_term_threshold = registry_data.get("early_termination_reward_threshold")
     early_term_window = registry_data.get("early_termination_window", 50)
     reward_params = registry_data.get("reward_params", {})
@@ -66,7 +65,7 @@ def _create_lstm_env(env_config):
     )
     if records is not None:
         from rl_agent.recording_env import RecordingEnv
-        env = RecordingEnv(env, records, start_time)
+        env = RecordingEnv(env, records)
     return env
 
 
@@ -110,7 +109,6 @@ class MPQUICLSTMAgent:
         pmf_client=None,
         session_id: str = "default",
         training_records=None,
-        training_start_time=0.0,
         early_termination_reward_threshold: Optional[float] = None,
         early_termination_window: int = 50,
         reward_params: Optional[Dict[str, Any]] = None,
@@ -143,7 +141,6 @@ class MPQUICLSTMAgent:
             "pmf_client": pmf_client,
             "session_id": session_id,
             "training_records": training_records,
-            "training_start_time": training_start_time or time.time(),
             "early_termination_reward_threshold": early_termination_reward_threshold,
             "early_termination_window": early_termination_window,
             "reward_params": reward_params or {},

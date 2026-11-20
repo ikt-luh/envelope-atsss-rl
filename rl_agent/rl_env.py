@@ -31,24 +31,34 @@ except ImportError:  # fix for Python < 3.11
 
 logger = logging.getLogger(__name__)
 
-OBS_DIM = 16
+OBS_DIM = 17
 OBS_FLAG_VALID = 1
 OBS_FLAG_INVALID = 0
 
 OBS_LOW = np.array(
-    [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, OBS_FLAG_INVALID, OBS_FLAG_INVALID, OBS_FLAG_INVALID],
+    [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, OBS_FLAG_INVALID, OBS_FLAG_INVALID, OBS_FLAG_INVALID],
     dtype=np.float32,
 )
 OBS_HIGH = np.array(
-    [1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 0.5, 1.0, 1.0, 0.5, float('inf'), float('inf'), 1.0, OBS_FLAG_VALID, OBS_FLAG_VALID, OBS_FLAG_VALID],
+    [1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 0.5, 1.0, 1.0, 0.5, float('inf'), float('inf'), 1.0, float('inf'), OBS_FLAG_VALID, OBS_FLAG_VALID, OBS_FLAG_VALID],
     dtype=np.float32,
 )
 OBS_PLACEHOLDER = OBS_LOW
 
 
-def build_observation(metrics: PMFMetrics, previous_action, delta_bytes_wifi, delta_bytes_fiveg) -> np.ndarray:
+def build_observation(metrics: PMFMetrics, previous_action, delta_bytes_wifi, delta_bytes_fiveg, delta_time_s) -> np.ndarray:
     """
     Build an observation from a PMFMetrics instance and additional info.
+
+    Args:
+        metrics (PMFMetrics): up to date metrics that reflect the effects of the previous action
+        previous_action (_type_): the previous action (wifi_ratio)
+        delta_bytes_wifi (_type_): bytes sent via wifi since the last step
+        delta_bytes_fiveg (_type_): bytes sent via fiveg since the last step
+        delta_time_s (_type_): elapsed time since the last observation (measurement time frame of delta_bytes) in seconds
+
+    Returns:
+        np.ndarray: observation array
     """
     obs = np.array([
         metrics.wifi_rtt_ms / 1000.0,
@@ -64,6 +74,7 @@ def build_observation(metrics: PMFMetrics, previous_action, delta_bytes_wifi, de
         delta_bytes_wifi / 1_000_000.0,
         delta_bytes_fiveg / 1_000_000.0,
         previous_action,
+        delta_time_s,
         OBS_FLAG_VALID if metrics.wifi_valid else OBS_FLAG_INVALID,
         OBS_FLAG_VALID if metrics.fiveg_valid else OBS_FLAG_INVALID,
         OBS_FLAG_VALID], dtype=np.float32)
@@ -82,9 +93,14 @@ class LogRLEnvMetricsCallback(RLlibCallback):
         "stability_term",
         "reward_total",
         # interface metrics
-        "bytes_sent_fifo",
-        "bytes_sent_wifi",
-        "bytes_sent_fiveg",
+        "delta_bytes_sent_fifo",
+        "delta_bytes_sent_wifi",
+        "delta_bytes_sent_fiveg",
+        "delta_time_monotonic",
+        # additional metrics
+        "pacer_sleep_time_ms",
+        "pacer_outside_time_ms",
+        "pacer_obs_time_ms"
     ]
 
     def on_episode_created(self, *, episode, **kwargs):
@@ -94,11 +110,18 @@ class LogRLEnvMetricsCallback(RLlibCallback):
     def on_episode_step(self, *, episode: EpisodeV2, **kwargs):
         info = episode.last_info_for()
         for key in self.metric_keys:
-            episode.user_data[key].append(info[key])
+            val = info[key]
+            if val is None:
+                continue
+            episode.user_data[key].append(val)
 
     def on_episode_end(self, *, episode: EpisodeV2, **kwargs):
         for key in self.metric_keys:
-            vals = np.array(episode.user_data[key])
+            vals_list = episode.user_data[key]
+            if len(vals_list) == 0:
+                continue
+
+            vals = np.array(vals_list)
             episode.custom_metrics[f"episode/{key}_mean"] = vals.mean()
             episode.custom_metrics[f"episode/{key}_min"] = vals.min()
             episode.custom_metrics[f"episode/{key}_max"] = vals.max()
@@ -163,6 +186,7 @@ class StepPacer:
         self.duration_outside = None
         self.time_start = time.monotonic()
         self.step = 0
+        self.duration_sleep = None
 
     def ema(self, old_value, new_value):
         if old_value is None:
@@ -176,6 +200,7 @@ class StepPacer:
             self.time_exit = None
             self.duration_outside = None
             self.time_start = time.monotonic()
+            self.duration_sleep = None
             self.step = 0
         return self
 
@@ -193,22 +218,22 @@ class StepPacer:
             self.duration_outside = now - self.time_exit
 
         if self.interval_s is not None:
-            sleep_time = self.interval_s
+            self.duration_sleep = self.interval_s
             if self.duration_outside is not None:
-                sleep_time -= self.duration_outside
+                self.duration_sleep -= self.duration_outside
             if self.duration_observation_smooth is not None:
-                sleep_time -= self.duration_observation_smooth
+                self.duration_sleep -= self.duration_observation_smooth
 
-            if sleep_time >= 0:
-                time.sleep(sleep_time)
+            if self.duration_sleep >= 0:
+                time.sleep(self.duration_sleep)
             else:
                 logger.warning(
                     f"Decision interval of {self.interval_s} s may be too short. " + self._timing_str()
                 )
         else:
-            sleep_time = None
+            self.duration_sleep = None
 
-        logger.info(f"{self.step}: time {now - self.time_start:.2f}s, {self._timing_str()}, sleep {_fmt_opt_float(sleep_time)}s")
+        logger.info(f"{self.step}: time {now - self.time_start:.2f}s, {self._timing_str()}, sleep {_fmt_opt_float(self.duration_sleep)}s")
 
         self.time_enter = time.monotonic()
         return self
@@ -323,8 +348,9 @@ class RLEnv(gym.Env):
         self.current_observation = build_observation(
             metrics,
             wifi_ratio,
-            delta_bytes_wifi=delta_bytes_sent['bytes_sent_wifi'],
-            delta_bytes_fiveg=delta_bytes_sent['bytes_sent_fiveg']
+            delta_bytes_wifi=delta_bytes_sent['delta_bytes_sent_wifi'],
+            delta_bytes_fiveg=delta_bytes_sent['delta_bytes_sent_fiveg'],
+            delta_time_s=delta_bytes_sent['delta_time_monotonic'],
         )
 
         logger.info(f"{self.current_step}: initial wifi_ratio {wifi_ratio:.3f}")
@@ -343,7 +369,7 @@ class RLEnv(gym.Env):
             wifi_ratio = float(np.clip(action.item(), 0.0, 1.0))
 
         # first apply the action in the environment
-        timestamp_decision_sent = get_timestamp_str()
+        timestamp_ratio_sent = get_timestamp_str()
         if self.aue_client is not None:
             try:
                 self.aue_client.send_ratio(wifi_ratio)
@@ -363,19 +389,20 @@ class RLEnv(gym.Env):
         next_observation = build_observation(
             metrics,
             wifi_ratio,
-            delta_bytes_wifi=delta_bytes_sent['bytes_sent_wifi'],
-            delta_bytes_fiveg=delta_bytes_sent['bytes_sent_fiveg']
+            delta_bytes_wifi=delta_bytes_sent['delta_bytes_sent_wifi'],
+            delta_bytes_fiveg=delta_bytes_sent['delta_bytes_sent_fiveg'],
+            delta_time_s=delta_bytes_sent['delta_time_monotonic'],
         )
         self._update_obs_for_step(next_observation)
         timestamp_observation = get_timestamp_str()
 
         # record when action was applied
         if self.aue_client is not None:
-            timestamp_decision_applied = self.aue_client.get_timestamp()
+            timestamp_ratio_applied = self.aue_client.get_timestamp()
         else:
-            timestamp_decision_applied = timestamp_decision_sent
+            timestamp_ratio_applied = timestamp_ratio_sent
 
-        logger.info(f"{self.current_step}: wifi_ratio {wifi_ratio:.3f}, sent {timestamp_decision_sent[11:]}, applied {timestamp_decision_applied[11:]}, obs {timestamp_observation[11:]}")
+        logger.info(f"{self.current_step}: wifi_ratio {wifi_ratio:.3f}, sent {timestamp_ratio_sent[11:]}, applied {timestamp_ratio_applied[11:]}, obs {timestamp_observation[11:]}")
 
         # get the reward based this observation
         reward, self._last_reward_components = RLEnv.get_reward_and_metrics(
@@ -398,13 +425,18 @@ class RLEnv(gym.Env):
         info = {
             "step": self.current_step,
             "episode_idx": self._episode_idx,
-            "step_in_episode": self.current_step,  # TODO: remove duplicate info
-            "timestamp_decision_sent": timestamp_decision_sent,
-            "timestamp_decision_applied": timestamp_decision_applied,
+            "timestamp_ratio_sent": timestamp_ratio_sent,
+            "timestamp_ratio_applied": timestamp_ratio_applied,
             "timestamp_observation": timestamp_observation,
+            "observation_age_ms": getattr(metrics, "observation_age_s", 0.0) * 1000.0,
+            "wifi_valid": metrics.wifi_valid,
+            "fiveg_valid": metrics.fiveg_valid,
+            "pacer_obs_time_ms": None if self.pacer.duration_observation is None else self.pacer.duration_observation * 1000,
+            "pacer_sleep_time_ms": None if self.pacer.duration_sleep is None else self.pacer.duration_sleep * 1000,
+            "pacer_outside_time_ms": None if self.pacer.duration_outside is None else self.pacer.duration_outside * 1000,
             **self._last_reward_components,
             **self._scenario_info,
-            **new_bytes_sent_dict
+            **delta_bytes_sent
         }
         if hasattr(self, "observation_history"):
             info["sequence_len"] = len(self.observation_history)

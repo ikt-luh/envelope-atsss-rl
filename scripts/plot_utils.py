@@ -17,8 +17,8 @@ FIVEG_COLOR = "#e74c3c"
 
 
 def plot_latency(records: List[Dict[str, Any]], out_path: Path, title: str = "Latency Over Time") -> None:
-    xs = [r["elapsed_s"] for r in records]
-    ys = [r["latency_ms"] for r in records]
+    xs = [r["experiment_elapsed_s"] for r in records]
+    ys = [r["step_time_ms"] for r in records]
     plt.figure(figsize=(10, 4))
     plt.plot(xs, ys, linewidth=1.0)
     plt.title(title)
@@ -33,18 +33,20 @@ def plot_latency(records: List[Dict[str, Any]], out_path: Path, title: str = "La
 def plot_decision_time_over_time(
     records: List[Dict[str, Any]],
     out_path: Path,
+    time_key,
+    time_label,
     title: str = "Training Decision Time Over Time",
     reset_threshold_ms: float = 1000.0,
 ) -> None:
     rows = [
         r for r in records
-        if r.get("decision_time_ms") is not None and r.get("elapsed_s") is not None
+        if r.get(time_key) is not None and r.get("experiment_elapsed_s") is not None
     ]
     if not rows:
         return
 
-    xs = [float(r["elapsed_s"]) for r in rows]
-    ys = [float(r["decision_time_ms"]) for r in rows]
+    xs = [float(r["experiment_elapsed_s"]) for r in rows]
+    ys = [float(r[time_key]) for r in rows]
 
     inference_x = [x for x, y in zip(xs, ys) if y < reset_threshold_ms]
     inference_y = [y for y in ys if y < reset_threshold_ms]
@@ -78,7 +80,7 @@ def plot_decision_time_over_time(
                        label="median %.1fms" % p50)
         ax_bot.axhline(p95, color="#1976D2", linestyle=":", linewidth=1.0,
                        label="p95 %.1fms" % p95)
-    ax_bot.set_ylabel("Inference time (ms)")
+    ax_bot.set_ylabel(time_label)
     ax_bot.set_xlabel("Elapsed (s)")
     ax_bot.set_title("Agent Inference Time  (pure neural network decision)")
     ax_bot.legend(fontsize=8)
@@ -93,14 +95,16 @@ def plot_decision_time_over_time(
 def plot_decision_time_histogram(
     records: List[Dict[str, Any]],
     out_path: Path,
+    time_key,
+    time_label,
     title: str = "Decision Time Distribution",
     reset_threshold_ms: float = 1000.0,
 ) -> None:
     vals = [
-        float(r["decision_time_ms"])
+        float(r[time_key])
         for r in records
-        if r.get("decision_time_ms") is not None
-        and float(r["decision_time_ms"]) < reset_threshold_ms
+        if r.get(time_key) is not None
+        and float(r[time_key]) < reset_threshold_ms
     ]
     if not vals:
         return
@@ -125,7 +129,7 @@ def plot_decision_time_histogram(
                label="p99 %.1fms" % p99)
     ax.set_xlim(0, x_max)
     ax.set_title("%s  (episode resets excluded)" % title)
-    ax.set_xlabel("Inference time (ms)")
+    ax.set_xlabel(time_label)
     ax.set_ylabel("Count")
     ax.legend(fontsize=9)
     ax.grid(alpha=0.3, axis="y")
@@ -138,7 +142,7 @@ def plot_ratio(records: List[Dict[str, Any]], out_path: Path) -> None:
     ok_records = [r for r in records if r.get("ok", True)]
     if not ok_records:
         return
-    xs = [r["elapsed_s"] for r in ok_records]
+    xs = [r["experiment_elapsed_s"] for r in ok_records]
     wifi = [r["wifi_ratio"] for r in ok_records]
     fiveg = [r["fiveg_ratio"] for r in ok_records]
     plt.figure(figsize=(10, 4))
@@ -290,10 +294,10 @@ def plot_bytes_sent(records: List[Dict[str, Any]], out_path: Path) -> None:
     if not ok:
         return
 
-    steps     = list(range(1, len(ok) + 1))
-    bytes_sent_fifo  = [float(r["bytes_sent_fifo"])  if r.get("bytes_sent_fifo")  is not None else None for r in ok]
-    bytes_sent_wifi = [float(r["bytes_sent_wifi"]) if r.get("bytes_sent_wifi") is not None else None for r in ok]
-    bytes_sent_fiveg  = [float(r["bytes_sent_fiveg"])  if r.get("bytes_sent_fiveg")  is not None else None for r in ok]
+    steps = list(range(1, len(ok) + 1))
+    bytes_sent_fifo = np.array([float(r["delta_bytes_sent_fifo"])  if r.get("delta_bytes_sent_fifo")  is not None else None for r in ok]).cumsum()
+    bytes_sent_wifi = np.array([float(r["delta_bytes_sent_wifi"]) if r.get("delta_bytes_sent_wifi") is not None else None for r in ok]).cumsum()
+    bytes_sent_fiveg = np.array([float(r["delta_bytes_sent_fiveg"])  if r.get("delta_bytes_sent_fiveg")  is not None else None for r in ok]).cumsum()
 
     boundaries = []
     labels = []
@@ -354,26 +358,18 @@ def plot_bitrate_sent(records: List[Dict[str, Any]], out_path: Path) -> None:
     if not ok:
         return
 
-    elapsed_time = np.array([float(r["elapsed_s"])  if r.get("elapsed_s")  is not None else None for r in ok])
+    window_s = np.array([float(r["delta_time_monotonic"]) if r.get("delta_time_monotonic") is not None else None for r in ok])
 
-    def diff_array(arr):
-        arr[1:] = (arr[1:] - arr[:-1])
-        arr[0] = np.nan
-        arr[arr < 0] = np.nan
+    def delta_bytes_to_bitrate(arr):
+        return (arr / window_s) * 8 / 1_000_000
 
-    diff_array(elapsed_time)
+    delta_bytes_sent_fifo = np.array([float(r["delta_bytes_sent_fifo"])  if r.get("delta_bytes_sent_fifo")  is not None else None for r in ok])
+    delta_bytes_sent_wifi = np.array([float(r["delta_bytes_sent_wifi"]) if r.get("delta_bytes_sent_wifi") is not None else None for r in ok])
+    delta_bytes_sent_fiveg = np.array([float(r["delta_bytes_sent_fiveg"])  if r.get("delta_bytes_sent_fiveg")  is not None else None for r in ok])
 
-    def bytes_to_bitrate(arr):
-        diff_array(arr)
-        arr[:] = (arr / elapsed_time) * 8 / 1_000_000
-
-    bytes_sent_fifo = np.array([float(r["bytes_sent_fifo"])  if r.get("bytes_sent_fifo")  is not None else None for r in ok])
-    bytes_sent_wifi =  np.array([float(r["bytes_sent_wifi"]) if r.get("bytes_sent_wifi") is not None else None for r in ok])
-    bytes_sent_fiveg  = np.array([float(r["bytes_sent_fiveg"])  if r.get("bytes_sent_fiveg")  is not None else None for r in ok])
-
-    bytes_to_bitrate(bytes_sent_fifo)
-    bytes_to_bitrate(bytes_sent_wifi)
-    bytes_to_bitrate(bytes_sent_fiveg)
+    bitrate_fifo = delta_bytes_to_bitrate(delta_bytes_sent_fifo)
+    bitrate_wifi = delta_bytes_to_bitrate(delta_bytes_sent_wifi)
+    bitrate_fiveg = delta_bytes_to_bitrate(delta_bytes_sent_fiveg)
 
     steps = list(range(1, len(ok) + 1))
     boundaries = []
@@ -397,7 +393,7 @@ def plot_bitrate_sent(records: List[Dict[str, Any]], out_path: Path) -> None:
             ax.plot(px, py, color=color, linewidth=0.9, alpha=0.8, label=label)
 
     ax = axes[0]
-    _plot_series(ax, steps, bytes_sent_fifo,  FIFO_COLOR, "MPQUIC input FIFO")
+    _plot_series(ax, steps, bitrate_fifo,  FIFO_COLOR, "MPQUIC input FIFO")
     for b in boundaries:
         ax.axvline(b, color="grey", linewidth=0.6, linestyle=":", alpha=0.6)
     ax.set_ylabel("Bitrate [Mbps]")
@@ -406,7 +402,7 @@ def plot_bitrate_sent(records: List[Dict[str, Any]], out_path: Path) -> None:
     ax.grid(alpha=0.25)
 
     ax = axes[1]
-    _plot_series(ax, steps, bytes_sent_wifi,  WIFI_COLOR, "WiFi interface")
+    _plot_series(ax, steps, bitrate_wifi,  WIFI_COLOR, "WiFi interface")
     for b in boundaries:
         ax.axvline(b, color="grey", linewidth=0.6, linestyle=":", alpha=0.6)
     ax.set_ylabel("Bitrate [Mbps]")
@@ -415,7 +411,7 @@ def plot_bitrate_sent(records: List[Dict[str, Any]], out_path: Path) -> None:
     ax.grid(alpha=0.25)
 
     ax = axes[2]
-    _plot_series(ax, steps, bytes_sent_fiveg,  FIVEG_COLOR, "5G interface")
+    _plot_series(ax, steps, bitrate_fiveg,  FIVEG_COLOR, "5G interface")
     for i, (b, lbl) in enumerate(zip(boundaries, labels)):
         ax.axvline(b, color="grey", linewidth=0.6, linestyle=":", alpha=0.6)
         ax.text(b + 0.5, 0.1, lbl, fontsize=5, rotation=90, color="grey",

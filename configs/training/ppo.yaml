@@ -18,6 +18,7 @@ agent_config:
   num_workers: 0
   normalize_rewards: true
   train_batch_size: 450  # 300 also works but 450 seems to behave a bit more nicely
+  metrics_num_episodes_for_smoothing: 15 # IMPORTANT: has to be train_batch_size / max_steps, otherwise logging results per train iteration are smoothed
   minibatch_size: 32
   num_epochs: 10
   lr: 5.0e-5 # TODO: changed from 5

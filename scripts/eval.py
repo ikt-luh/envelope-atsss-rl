@@ -35,7 +35,7 @@ except Exception:
 
 from aue_client.client import AUEClient
 import config
-from pmf_client.client import PMFClientManager
+from pmf_client.client import PMFClientManager, PMFMetrics
 from rl_agent.heuristic_agent import HeuristicAgent
 from rl_agent.lstm_agent import MPQUICLSTMAgent
 from rl_agent.ppo_agent import MPQUICPPOAgent
@@ -76,6 +76,60 @@ def _detect_agent(checkpoint_path: Optional[Path]) -> str:
     return "ppo"
 
 
+def _create_eval_step_record(
+    step: int,
+    experiment_start_monotonic: float,
+    episode_start_monotonic: float,
+    step_start_monotonic: float,
+    inference_time_s: Optional[float],
+    pacer: StepPacer,
+    wifi_ratio: float,
+    metrics: PMFMetrics,
+    reward: Optional[float],
+    reward_metrics: Optional[dict],
+    delta_bytes_sent_dict: dict,
+    timestamp_ratio_sent: str,
+    timestamp_ratio_applied: str,
+    timestamp_observation: str,
+    scenario_label: Optional[str],
+    traffic_class: Optional[str],
+):
+    now = time.monotonic()
+    return {
+        "step": step,
+        "experiment_elapsed_s": now - experiment_start_monotonic,
+        "episode_elapsed_s": now - episode_start_monotonic,
+        "step_time_ms": (now - step_start_monotonic) * 1000,
+        "inference_time_ms": None if inference_time_s is None else inference_time_s * 1000,
+        "pacer_obs_time_ms": None if pacer.duration_observation is None else pacer.duration_observation * 1000,
+        "pacer_sleep_time_ms": None if pacer.duration_sleep is None else pacer.duration_sleep * 1000,
+        "pacer_outside_time_ms": None if pacer.duration_outside is None else pacer.duration_outside * 1000,
+        "wifi_ratio": wifi_ratio,
+        "fiveg_ratio": 1 - wifi_ratio,
+        "reward": None if reward is None else reward,
+        "wifi_rtt_ms": metrics.wifi_rtt_ms,
+        "fiveg_rtt_ms": metrics.fiveg_rtt_ms,
+        "wifi_plr": metrics.wifi_plr,
+        "fiveg_plr": metrics.fiveg_plr,
+        "wifi_rtt_min_ms": metrics.wifi_rtt_min_ms,
+        "wifi_rtt_max_ms": metrics.wifi_rtt_max_ms,
+        "wifi_rtt_std_ms": metrics.wifi_rtt_std_ms,
+        "fiveg_rtt_min_ms": metrics.fiveg_rtt_min_ms,
+        "fiveg_rtt_max_ms": metrics.fiveg_rtt_max_ms,
+        "fiveg_rtt_std_ms": metrics.fiveg_rtt_std_ms,
+        "wifi_valid": metrics.wifi_valid,
+        "fiveg_valid": metrics.fiveg_valid,
+        "timestamp_ratio_sent": timestamp_ratio_sent,
+        "timestamp_ratio_applied": timestamp_ratio_applied,
+        "timestamp_observation": timestamp_observation,
+        "observation_age_ms": getattr(metrics, "observation_age_s", 0.0) * 1000.0,
+        "scenario_label": scenario_label,
+        "traffic_class": traffic_class,
+        **({} if reward_metrics is None else reward_metrics),
+        **delta_bytes_sent_dict
+    }
+
+
 def _run_eval_steps(
     agent,
     agent_type: str,
@@ -84,7 +138,7 @@ def _run_eval_steps(
     session_id: str,
     num_steps: int,
     reward_params: Dict[str, Any],
-    start_t: float,
+    experiment_start_monotonic: float,
     pacer: StepPacer,
     *,
     scenario_label: Optional[str] = None,
@@ -95,18 +149,11 @@ def _run_eval_steps(
     records: List[Dict[str, Any]] = []
     prev_wifi_ratio: Optional[float] = None
 
-    _null_record = {
-        "ok": False, "wifi_ratio": None, "fiveg_ratio": None, "reward": None,
-        "decision_time_ms": None,
-        "wifi_rtt_ms": None, "fiveg_rtt_ms": None, "wifi_plr": None, "fiveg_plr": None,
-        "wifi_rtt_min_ms": None, "wifi_rtt_max_ms": None, "wifi_rtt_std_ms": None,
-        "fiveg_rtt_min_ms": None, "fiveg_rtt_max_ms": None, "fiveg_rtt_std_ms": None,
-        "observation_age_ms": None, "weighted_rtt_ms": None, "weighted_plr": None,
-        "delta_action": None, "rtt_term": None, "plr_term": None,
-        "stability_term": None, "reward_total": None,
-    }
+    episode_start_monotonic = time.monotonic()
+    step_start_monotonic = time.monotonic()
 
     wifi_ratio = RLEnv.EVAL_INITIAL_WIFI_RATIO
+    timestamp_ratio_sent = get_timestamp_str()
     if aue_client is not None:
         try:
             aue_client.send_ratio(wifi_ratio)
@@ -120,16 +167,44 @@ def _run_eval_steps(
 
     with pacer(reset=True):
         metrics = pmf_client.get_metrics(session_id)
+    timestamp_observation = get_timestamp_str()
 
     new_bytes_sent_dict = TrafficWatcher.get_bytes_sent_dict(watcher)
     delta_bytes_sent = TrafficWatcher.delta(bytes_sent_dict, new_bytes_sent_dict)
     bytes_sent_dict = new_bytes_sent_dict
 
+    if aue_client is not None:
+        timestamp_ratio_applied = aue_client.get_timestamp()
+    else:
+        timestamp_ratio_applied = timestamp_ratio_sent
+
     next_obs = build_observation(
         metrics,
         wifi_ratio,
-        delta_bytes_wifi=delta_bytes_sent['bytes_sent_wifi'],
-        delta_bytes_fiveg=delta_bytes_sent['bytes_sent_fiveg']
+        delta_bytes_wifi=delta_bytes_sent['delta_bytes_sent_wifi'],
+        delta_bytes_fiveg=delta_bytes_sent['delta_bytes_sent_fiveg'],
+        delta_time_s=delta_bytes_sent['delta_time_monotonic'],
+    )
+
+    records.append(
+        _create_eval_step_record(
+            step=0,
+            experiment_start_monotonic=experiment_start_monotonic,
+            episode_start_monotonic=episode_start_monotonic,
+            step_start_monotonic=step_start_monotonic,
+            inference_time_s=None,
+            pacer=pacer,
+            wifi_ratio=wifi_ratio,
+            metrics=metrics,
+            reward=None,
+            reward_metrics=None,
+            delta_bytes_sent_dict=delta_bytes_sent,
+            timestamp_ratio_sent=timestamp_ratio_sent,
+            timestamp_ratio_applied=timestamp_ratio_applied,
+            timestamp_observation=timestamp_observation,
+            scenario_label=scenario_label,
+            traffic_class=traffic_class
+        )
     )
 
     logger.info(f"0: initial wifi_ratio {wifi_ratio:.3f}")
@@ -138,12 +213,11 @@ def _run_eval_steps(
         prev_wifi_ratio = wifi_ratio
         obs = next_obs
 
-        step_t0 = time.monotonic()
+        step_start_monotonic = time.monotonic()
         wifi_ratio = float(np.clip(agent.select_action(obs).item(), 0.0, 1.0))
-        decision_time_ms = (time.monotonic() - step_t0) * 1000.0
-        fiveg_ratio = 1.0 - wifi_ratio
+        inference_time_s = time.monotonic() - step_start_monotonic
 
-        timestamp_decision_sent = get_timestamp_str()
+        timestamp_ratio_sent = get_timestamp_str()
         if aue_client is not None:
             try:
                 aue_client.send_ratio(wifi_ratio)
@@ -156,59 +230,61 @@ def _run_eval_steps(
         timestamp_observation = get_timestamp_str()
 
         new_bytes_sent_dict = TrafficWatcher.get_bytes_sent_dict(watcher)
-        bytes_sent_delta = TrafficWatcher.delta(bytes_sent_dict, new_bytes_sent_dict)
-        next_delta_bytes_wifi = bytes_sent_delta['bytes_sent_wifi']
-        next_delta_bytes_fiveg = bytes_sent_delta['bytes_sent_fiveg']
+        delta_bytes_sent = TrafficWatcher.delta(bytes_sent_dict, new_bytes_sent_dict)
         bytes_sent_dict = new_bytes_sent_dict
 
-        next_obs = build_observation(metrics, wifi_ratio, next_delta_bytes_wifi, next_delta_bytes_fiveg)
+        next_obs = build_observation(
+            metrics,
+            wifi_ratio,
+            delta_bytes_wifi=delta_bytes_sent['delta_bytes_sent_wifi'],
+            delta_bytes_fiveg=delta_bytes_sent['delta_bytes_sent_fiveg'],
+            delta_time_s=delta_bytes_sent['delta_time_monotonic'],
+        )
+
         reward, reward_metrics = RLEnv.get_reward_and_metrics(next_obs, wifi_ratio, prev_wifi_ratio, **reward_params)
 
         # check when action was applied
         if aue_client is not None:
-            timestamp_decision_applied = aue_client.get_timestamp()
+            timestamp_ratio_applied = aue_client.get_timestamp()
         else:
-            timestamp_decision_applied = timestamp_decision_sent
+            timestamp_ratio_applied = timestamp_ratio_sent
 
-        logger.info(f"{step + 1}: wifi_ratio {wifi_ratio:.3f}, sent {timestamp_decision_sent[11:]}, applied {timestamp_decision_applied[11:]}, obs {timestamp_observation[11:]}")
+        logger.info(f"{step + 1}: wifi_ratio {wifi_ratio:.3f}, sent {timestamp_ratio_sent[11:]}, applied {timestamp_ratio_applied[11:]}, obs {timestamp_observation[11:]}")
 
-        latency_ms = (time.monotonic() - step_t0) * 1000
-        rec = {
-            "step": step,
-            "elapsed_s": round(time.monotonic() - start_t, 3),
-            "latency_ms": round(latency_ms, 3),
-            "decision_time_ms": round(float(decision_time_ms), 3),
-            "metrics_time_ms": round(float(pacer.duration_observation * 1000), 3),
-            "ok": True,
-            "wifi_ratio": wifi_ratio,
-            "fiveg_ratio": fiveg_ratio,
-            "reward": round(reward, 4),
-            "wifi_rtt_ms": metrics.wifi_rtt_ms,
-            "fiveg_rtt_ms": metrics.fiveg_rtt_ms,
-            "wifi_plr": metrics.wifi_plr,
-            "fiveg_plr": metrics.fiveg_plr,
-            "wifi_rtt_min_ms": metrics.wifi_rtt_min_ms,
-            "wifi_rtt_max_ms": metrics.wifi_rtt_max_ms,
-            "wifi_rtt_std_ms": metrics.wifi_rtt_std_ms,
-            "fiveg_rtt_min_ms": metrics.fiveg_rtt_min_ms,
-            "fiveg_rtt_max_ms": metrics.fiveg_rtt_max_ms,
-            "fiveg_rtt_std_ms": metrics.fiveg_rtt_std_ms,
-            "timestamp_decision_sent": timestamp_decision_sent,
-            "timestamp_decision_applied": timestamp_decision_applied,
-            "timestamp_observation": timestamp_observation,
-            "observation_age_ms": round(getattr(metrics, "observation_age_s", 0.0) * 1000.0, 3),
-            **reward_metrics,
-            **new_bytes_sent_dict
-        }
-        if scenario_label is not None:
-            rec["scenario_label"] = scenario_label
-            rec["traffic_class"] = traffic_class
-        records.append(rec)
+        records.append(
+            _create_eval_step_record(
+                step=step + 1,
+                experiment_start_monotonic=experiment_start_monotonic,
+                episode_start_monotonic=episode_start_monotonic,
+                step_start_monotonic=step_start_monotonic,
+                inference_time_s=inference_time_s,
+                pacer=pacer,
+                wifi_ratio=wifi_ratio,
+                metrics=metrics,
+                reward=reward,
+                reward_metrics=reward_metrics,
+                delta_bytes_sent_dict=delta_bytes_sent,
+                timestamp_ratio_sent=timestamp_ratio_sent,
+                timestamp_ratio_applied=timestamp_ratio_applied,
+                timestamp_observation=timestamp_observation,
+                scenario_label=scenario_label,
+                traffic_class=traffic_class
+            )
+        )
 
         if (step + 1) % 10 == 0:
             print(f"  step {step + 1}/{num_steps} wifi={wifi_ratio:.3f} reward={reward:.3f}")
 
     return records
+
+
+def np_arr_summary_dict(arr: np.ndarray):
+    return {
+        "mean": np.mean(arr),
+        "min": np.min(arr),
+        "max": np.max(arr),
+        "std": np.std(arr)
+    }
 
 
 def main() -> int:
@@ -400,7 +476,7 @@ def main() -> int:
 
     all_records: List[Dict[str, Any]] = []
     episode_summaries: List[Dict[str, Any]] = []
-    start_t = time.monotonic()
+    experiment_start_monotonic = time.monotonic()
     pacer = StepPacer(interval_s=interval_s, ema_alpha=RLEnv.EMA_ALPHA)
 
     try:
@@ -429,7 +505,7 @@ def main() -> int:
 
                     sc_records = _run_eval_steps(
                         agent, agent_type, pmf_client, aue_client, session_id,
-                        args.steps, reward_params, start_t, pacer,
+                        args.steps, reward_params, experiment_start_monotonic, pacer,
                         scenario_label=label,
                         traffic_class=tc,
                         watcher=traffic_watcher
@@ -461,7 +537,7 @@ def main() -> int:
             # standard eval (no scenarios, single episode)
             sc_records = _run_eval_steps(
                 agent, agent_type, pmf_client, aue_client, session_id,
-                args.steps, reward_params, start_t, pacer
+                args.steps, reward_params, experiment_start_monotonic, pacer
             )
             all_records.extend(sc_records)
     finally:
@@ -474,11 +550,12 @@ def main() -> int:
                 pass
 
     # save CSV
-    ok_records = [r for r in all_records if r["ok"]]
     csv_path = run_dir / "decisions.csv"
     if all_records:
         with csv_path.open("w", newline="") as f:
-            writer = csv.DictWriter(f, fieldnames=list(all_records[0].keys()))
+            # important: get field names from first step, not from initial observation (entry/step 0)
+            fieldnames = list(all_records[1].keys())
+            writer = csv.DictWriter(f, fieldnames=fieldnames)
             writer.writeheader()
             writer.writerows(all_records)
 
@@ -490,10 +567,14 @@ def main() -> int:
             writer.writeheader()
             writer.writerows(episode_summaries)
 
-    latencies = [r["latency_ms"] for r in all_records if r["latency_ms"] is not None]
-    decision_times = [r.get("decision_time_ms") for r in all_records if r.get("decision_time_ms") is not None]
-    metrics_time_ms = [r.get("metrics_time_ms") for r in all_records if r.get("metrics_time_ms") is not None]
-    rewards = [r["reward"] for r in ok_records if r["reward"] is not None]
+    step_time_ms = np.array([r["step_time_ms"] for r in all_records if r["step_time_ms"] is not None])
+    inference_time_ms = np.array([r.get("inference_time_ms") for r in all_records if r.get("inference_time_ms") is not None])
+    pacer_obs_time_ms = np.array([r.get("pacer_obs_time_ms") for r in all_records if r.get("pacer_obs_time_ms") is not None])
+    pacer_sleep_time_ms = np.array([r.get("pacer_sleep_time_ms") for r in all_records if r.get("pacer_sleep_time_ms") is not None])
+    pacer_outside_time_ms = np.array([r.get("pacer_outside_time_ms") for r in all_records if r.get("pacer_outside_time_ms") is not None])
+    rewards = np.array([r["reward"] for r in all_records if r["reward"] is not None])
+    wifi_ratios = np.array([r["wifi_ratio"] for r in all_records if r["wifi_ratio"] is not None])
+    fiveg_ratios = np.array([r["fiveg_ratio"] for r in all_records if r["fiveg_ratio"] is not None])
     summary = {
         "agent": agent_type,
         "checkpoint": str(checkpoint_path) if checkpoint_path else None,
@@ -501,29 +582,16 @@ def main() -> int:
         "scenarios_evaluated": len(scenario_configs) if scenario_configs else 0,
         "steps_per_scenario": args.steps,
         "steps_total": len(all_records),
-        "steps_ok": len(ok_records),
-        "success_rate_pct": round(len(ok_records) / len(all_records) * 100, 2) if all_records else 0,
-        "latency_ms": {
-            "mean": round(sum(latencies) / len(latencies), 3) if latencies else None,
-            "max": max(latencies) if latencies else None,
-        },
-        "decision_time_ms": {
-            "mean": round(sum(decision_times) / len(decision_times), 3) if decision_times else None,
-            "max": max(decision_times) if decision_times else None,
-        },
-        "metrics_time_ms": {
-            "mean": round(sum(metrics_time_ms) / len(metrics_time_ms), 3) if metrics_time_ms else None,
-            "max": max(metrics_time_ms) if metrics_time_ms else None,
-        },
-        "reward_mean": round(sum(rewards) / len(rewards), 4) if rewards else None,
-        "ratio_mean": {
-            "wifi": round(sum(r["wifi_ratio"] for r in ok_records) / len(ok_records), 6) if ok_records else None,
-            "fiveg": round(sum(r["fiveg_ratio"] for r in ok_records) / len(ok_records), 6) if ok_records else None,
-        },
-        "ratio_std": {
-            "wifi": round(np.std([r["wifi_ratio"] for r in ok_records]), 6) if ok_records else None,
-            "fiveg": round(np.std([r["fiveg_ratio"] for r in ok_records]), 6) if ok_records else None,
-        },
+        "steps_ok": len(all_records),
+        "success_rate_pct": round(len(all_records) / len(all_records) * 100, 2) if all_records else 0,
+        "step_time_ms": np_arr_summary_dict(step_time_ms),
+        "inference_time_ms": np_arr_summary_dict(inference_time_ms),
+        "pacer_obs_time_ms": np_arr_summary_dict(pacer_obs_time_ms),
+        "pacer_sleep_time_ms": np_arr_summary_dict(pacer_sleep_time_ms),
+        "pacer_outside_time_ms": np_arr_summary_dict(pacer_outside_time_ms),
+        "reward": np_arr_summary_dict(rewards),
+        "wifi_ratio": np_arr_summary_dict(wifi_ratios),
+        "fiveg_ratio": np_arr_summary_dict(fiveg_ratios),
         "sequence_len": args.sequence_len if agent_type == "lstm" else None,
         "heuristic_type": args.heuristic if agent_type == "heuristic" else None,
     }
@@ -537,31 +605,36 @@ def main() -> int:
     # plots
     if all_records:
         plot_latency(all_records, run_dir / "latency_over_time.png", title="Policy Step Latency Over Time")
-        if any(r.get("decision_time_ms") is not None for r in all_records):
+        if any(r.get("inference_time_ms") is not None for r in all_records):
             plot_decision_time_over_time(
                 all_records,
-                run_dir / "decision_time_over_time.png",
-                title="RL Decision Time (per decision)",
+                run_dir / "inference_time_ms.png",
+                "inference_time_ms",
+                "Inference time (ms)",
+                title="Inference Time",
             )
             plot_decision_time_histogram(
                 all_records,
-                run_dir / "decision_time_histogram.png",
-                title="Decision Time Distribution",
+                run_dir / "inference_time_ms.png",
+                "inference_time_ms",
+                "Inference time (ms)",
+                title="Inference Time Distribution",
             )
-        if ok_records:
-            plot_ratio(all_records, run_dir / "ratio_over_time.png")
-            plot_network_distribution(all_records, run_dir / "network_distribution.png")
-            plot_eval_timeline_reward_action(all_records, run_dir / "eval_timeline_reward_actions.png")
-            plot_eval_network_conditions(all_records, run_dir / "eval_network_conditions.png")
-            plot_eval_timeline_conditions_action(all_records, run_dir / "eval_timeline_conditions_actions.png")
-            plot_bytes_sent(all_records, run_dir / "bytes_sent.png")
-            plot_bitrate_sent(all_records, run_dir / "bitrate_sent.png")
+
+        plot_ratio(all_records, run_dir / "ratio_over_time.png")
+        plot_network_distribution(all_records, run_dir / "network_distribution.png")
+        plot_eval_timeline_reward_action(all_records, run_dir / "eval_timeline_reward_actions.png")
+        plot_eval_network_conditions(all_records, run_dir / "eval_network_conditions.png")
+        plot_eval_timeline_conditions_action(all_records, run_dir / "eval_timeline_conditions_actions.png")
+        plot_bytes_sent(all_records, run_dir / "bytes_sent.png")
+        plot_bitrate_sent(all_records, run_dir / "bitrate_sent.png")
 
     if episode_summaries:
         plot_reward_by_scenario(episode_summaries, run_dir / "reward_by_scenario.png")
         plot_reward_by_traffic_class(episode_summaries, run_dir / "reward_by_traffic_class.png")
         plot_scenario_distribution(episode_summaries, run_dir / "scenario_distribution.png")
         plot_action_by_scenario(episode_summaries, run_dir / "action_by_scenario.png")
+
     if args.with_scenarios and all_records:
         plot_rtt_by_traffic_class(all_records, run_dir / "rtt_by_traffic_class.png")
         plot_plr_by_traffic_class(all_records, run_dir / "plr_by_traffic_class.png")
