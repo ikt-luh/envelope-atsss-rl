@@ -181,8 +181,8 @@ class StepPacer:
 
     def _timing_str(self):
         return (
-            f"observation {_fmt_opt_float(self.duration_observation, suffix="s")} (ema {_fmt_opt_float(self.duration_observation_smooth, suffix="s")}), "
-            f"outside {_fmt_opt_float(self.duration_outside, suffix="s")}"
+            f"observation {_fmt_opt_float(self.duration_observation, suffix='s')} (ema {_fmt_opt_float(self.duration_observation_smooth, suffix='s')}), "
+            f"outside {_fmt_opt_float(self.duration_outside, suffix='s')}"
         )
 
     def __enter__(self):
